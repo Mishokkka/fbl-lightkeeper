@@ -145,10 +145,17 @@ export function createInterface(services) {
     static DEFAULT_OPTIONS = {window:{title:'Lightkeeper · Настройка предмета'},position:{width:620,height:760}};
     /** Snapshot editable Item configuration; the running instance remains independent. */
     constructor(item) {
-      super({id:`fbl-lightkeeper-item-${item.id}`}); this.item=item;
+      super({id:`fbl-lightkeeper-item-${item.uuid ?? item.id}`}); this.item=item;
       const identified = services.identify(item); this.config=identified.config; this.origin=identified.origin;
     }
     async _renderHTML() { return `<form class="lk-item-form" autocomplete="off">${renderItemEditor(this.item,this.config,services.catalog(),this.origin)}</form>`; }
+    _replaceHTML(html,content) {
+      super._replaceHTML(html,content);
+      content.querySelector('[name="remainingMinutes"]')?.addEventListener('input',event=>{
+        // Clearing an optional field means keeping current fuel, not restoring the opening snapshot.
+        this.remainingEdited=event.target.value.trim()!=='';
+      });
+    }
     get form() { return this.element?.querySelector('form'); }
     /** Validate the Item form and save either an Item snapshot or a reusable template. */
     async perform(action) {
@@ -157,11 +164,12 @@ export function createInterface(services) {
         const preset = services.catalog().sources.find(s=>s.id===id);
         if (!preset) throw new Error('Выберите шаблон.');
         this.config=normalizeConfig({...preset.config,remainingSeconds:preset.config.capacitySeconds});
+        this.remainingEdited=true;
         await this.render({force:true}); return;
       }
       if (!this.form.reportValidity()) return;
       this.config=readConfig(this.form,this.config,{item:true});
-      if (action==='save') { await services.saveItem(this.item,this.config); await this.close(); }
+      if (action==='save') { await services.saveItem(this.item,this.config,{remainingEdited:this.remainingEdited}); await this.close(); }
       else if (action==='save-template') {
         const catalog = services.catalog(); const id=foundry.utils.randomID();
         catalog.sources.push({id,label:this.item.name,icon:'lantern',names:[this.item.name],uuids:[],itemTypes:[],matchMode:'exact',

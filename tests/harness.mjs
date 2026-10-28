@@ -48,7 +48,7 @@ export async function harness({active=6,inactive=4000,inventory=100,client='GM',
     /** Item updates emit hooks even when render:false suppresses associated sheets. */
     for(let j=0;j<inventory;j++) {
       const config=j===0?normalizeConfig({enabled:true,capacitySeconds:7200,remainingSeconds:7200,lowFuelSeconds:0}):{enabled:false};
-      const item={id:'I'+j,uuid:actor.uuid+'.Item.I'+j,name:j===0?'Лампа '+i:'Снаряжение '+j,type:'gear',parent:actor,system:{quantity:1},flags:{[NS]:{light:config}},getFlag,
+      const item={id:'I'+j,uuid:actor.uuid+'.Item.I'+j,documentName:'Item',name:j===0?'Лампа '+i:'Снаряжение '+j,type:'gear',parent:actor,system:{quantity:1},flags:{[NS]:{light:config}},getFlag,
         async update(changes,options={}){record('item',this.id,changes,options);apply(this,changes);await fire('updateItem',this,changes,options,game.user.id);return this;},
         async setFlag(ns,key,value){return this.update({['flags.'+ns+'.'+key]:value});}};
       actor.items.push(item);

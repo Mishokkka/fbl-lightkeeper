@@ -215,6 +215,94 @@ test('refill from a linked token updates the token actually holding the tank',as
   env.now += 2000; await env.action('off'); assert.equal(env.remaining(),78);
 });
 
+test('a burning tank refills from its frozen recipe while edits apply on the next ignition',async () => {
+  const battery=makeItem(env.actor,'BATTERY',{enabled:false},2,'Батарейка');
+  await env.action('on');env.now+=60000;await env.tick();
+  Object.assign(env.lamp.flags[NS].light,{capacitySeconds:500,refillSeconds:90,refillItem:'Батарейка'});
+  await env.action('refill');
+  assert.equal(env.active().remainingSeconds,80);
+  assert.equal(env.remaining(),80);assert.equal(env.oil.system.quantity,1);assert.equal(battery.system.quantity,2);
+  assert.equal(env.lamp.getFlag(NS,'light').capacitySeconds,500);
+  await env.action('off');await env.action('on');await env.action('refill');
+  assert.equal(env.active().config.capacitySeconds,500);assert.equal(env.remaining(),170);
+  assert.equal(battery.system.quantity,1);
+});
+
+test('changing the future mode does not prevent refilling the currently burning tank',async () => {
+  await env.action('on');env.now+=60000;await env.tick();
+  env.lamp.flags[NS].light.mode='infinite';
+  assert.ok(await env.action('refill'));
+  assert.equal(env.active().config.mode,'tank');assert.equal(env.active().remainingSeconds,80);
+  assert.equal(env.lamp.getFlag(NS,'light').mode,'infinite');assert.equal(env.oil.system.quantity,1);
+});
+
+test('a pending mode change cannot let another linked token reuse a burning tank',async()=>{
+  const other=makeToken(env.actor,'T2');await env.action('on');env.lamp.flags[NS].light.mode='infinite';
+  assert.equal(await env.action('on','LAMP',other),null);assert.equal(env.active(other),undefined);
+});
+
+test('actor reassignment while ignition stock is saving refunds the original inventory',async()=>{
+  const candle=makeItem(env.actor,'CANDLE',{mode:'disposable'}),original=candle.update;
+  let release;const oldActor=env.actor;
+  candle.update=async function(changes){await new Promise(resolve=>{release=resolve;});this.update=original;return original.call(this,changes);};
+  const action=env.action('on','CANDLE');while(!release) await Promise.resolve();
+  env.token.actor=makeActor('Actor.OTHER');release();
+  assert.equal(await action,null);assert.equal(candle.system.quantity,1);assert.equal(env.active(),undefined);
+  assert.equal(oldActor.items.get('CANDLE'),candle);
+});
+
+test('actor reassignment while refill stock saves refunds it without rewriting the cleared source',async()=>{
+  await env.action('on');env.now+=60000;await env.tick();
+  const update=env.oil.update;let release;
+  env.oil.update=async function(changes){await new Promise(resolve=>{release=resolve;});this.update=update;return update.call(this,changes);};
+  const action=env.action('refill');while(!release) await Promise.resolve();
+  env.token.actor=makeActor('Actor.OTHER');await env.fire('updateToken',env.token,{actorId:'OTHER'});
+  await new Promise(resolve=>setTimeout(resolve,0));release();
+  assert.equal(await action,null);assert.equal(env.oil.system.quantity,2);assert.equal(env.remaining(),40);
+  assert.equal(env.active(),null);
+});
+
+test('legacy infinite sources persist their actor identity during takeover',async()=>{
+  makeItem(env.actor,'MAGIC',{mode:'infinite'});await env.action('on','MAGIC');delete env.active().actorKey;
+  env.gm.active=false;await env.fire('userConnected',env.gm,false);
+  env.gm.active=true;await env.fire('userConnected',env.gm,true);
+  assert.equal(env.active().actorKey,env.actor.uuid);
+});
+
+test('candle stubs remain scoped to their inventory when a token changes between copied actors',async()=>{
+  const candle=makeItem(env.actor,'CANDLE',{mode:'disposable'},2);
+  await env.action('on','CANDLE');env.now+=10000;await env.action('off');
+  const other=makeActor('Actor.OTHER'),copied=makeItem(other,'CANDLE',{mode:'disposable'},1);
+  env.token.actor=other;
+  assert.ok(await env.action('on','CANDLE'));assert.equal(copied.system.quantity,0);assert.equal(env.active().remainingSeconds,100);
+  await env.action('off');assert.equal(env.token.getFlag(NS,'stowedSources').length,2);
+  env.token.actor=env.actor;await env.action('on','CANDLE');
+  assert.equal(env.active().remainingSeconds,90);assert.equal(candle.system.quantity,1);
+});
+
+test('a failed expiry chat cannot refund fuel after a committed GM time adjustment',async () => {
+  await env.action('on');ChatMessage.create=async()=>{throw new Error('Chat unavailable');};
+  assert.ok(await env.api.api.requestAction(env.token,'adjust','',{deltaSeconds:-100}));
+  assert.equal(env.active(),null);assert.equal(env.remaining(),0);assert.equal(env.token.currentLight.bright,0);
+});
+
+test('a failed low-fuel chat does not abort extinguishing an already settled lamp',async () => {
+  env.lamp.flags[NS].light.lowFuelSeconds=90;
+  await env.action('on');env.now+=15000;ChatMessage.create=async()=>{throw new Error('Chat unavailable');};
+  assert.ok(await env.action('off'));assert.equal(env.active(),null);assert.equal(env.remaining(),85);
+});
+
+test('slow chat delivery does not hold the inventory action queue',async () => {
+  env.lamp.flags[NS].light.lowFuelSeconds=90;
+  await env.action('on');env.now+=15000;
+  let deliver;ChatMessage.create=()=>new Promise(resolve=>{deliver=resolve;});
+  let completed=false;const action=env.action('off').then(()=>{completed=true;});
+  try {
+    for(let i=0;i<100;i++) await Promise.resolve();
+    assert.equal(completed,true);assert.equal(env.active(),null);
+  } finally {deliver?.();await action;}
+});
+
 test('failure to consume ignition refunds the disposable source',async () => {
   const candle = makeItem(env.actor,'CANDLE',{mode:'disposable',ignitionMode:'consume',ignitionItem:'Спички'});
   const matches = makeItem(env.actor,'MATCH',{enabled:false},1,'Спички');

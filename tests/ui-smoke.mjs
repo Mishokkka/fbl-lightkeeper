@@ -64,7 +64,7 @@ try {
   await page.waitForFunction(()=>demo.api.getCatalog().sources.some(s=>s.id==='imported'));
   // Apply a preset in the actual item editor and save it back to the simulated Item.
   await panel.locator('.lk-source-row').filter({has:page.getByRole('heading',{name:'Карманный фонарик',exact:true})}).getByRole('button',{name:'Настроить',exact:true}).click();
-  const editor=page.locator('#fbl-lightkeeper-item-FLASH');
+  const editor=page.locator('[id="fbl-lightkeeper-item-Actor.A1.Item.FLASH"]');
   await editor.locator('[name="templateChoice"]').selectOption('hooded-lantern');
   await editor.getByRole('button',{name:'Применить',exact:true}).click();
   await editor.locator('[name="shutter"]:checked').waitFor();
@@ -78,6 +78,18 @@ try {
   await editor.getByRole('button',{name:'Сохранить предмет',exact:true}).click();await editor.waitFor({state:'hidden'});
   assert.equal(await page.evaluate(()=>demo.actor.items.get('FLASH').getFlag('fbl-lightkeeper','light').capacitySeconds),2400);
   assert.equal(await page.evaluate(()=>demo.actor.items.get('FLASH').getFlag('fbl-lightkeeper','light').remainingSeconds),2400);
+  // An open settings form must not restore fuel consumed/changed since it was opened.
+  await panel.locator('.lk-source-row').filter({has:page.getByRole('heading',{name:'Карманный фонарик',exact:true})}).getByRole('button',{name:'Настроить',exact:true}).click();
+  await editor.locator('[name="remainingMinutes"]').waitFor();
+  await page.evaluate(()=>demo.actor.items.get('FLASH').update({'flags.fbl-lightkeeper.light.remainingSeconds':2123}));
+  await editor.locator('[name="color"]').fill('#aaccee');
+  await editor.getByRole('button',{name:'Сохранить предмет',exact:true}).click();await editor.waitFor({state:'hidden'});
+  assert.equal(await page.evaluate(()=>demo.actor.items.get('FLASH').getFlag('fbl-lightkeeper','light').remainingSeconds),2123);
+  // An explicit fuel edit still works, including an empty tank.
+  await panel.locator('.lk-source-row').filter({has:page.getByRole('heading',{name:'Карманный фонарик',exact:true})}).getByRole('button',{name:'Настроить',exact:true}).click();
+  await editor.locator('[name="remainingMinutes"]').fill('0');
+  await editor.getByRole('button',{name:'Сохранить предмет',exact:true}).click();await editor.waitFor({state:'hidden'});
+  assert.equal(await page.evaluate(()=>demo.actor.items.get('FLASH').getFlag('fbl-lightkeeper','light').remainingSeconds),0);
   // CodeRabbit regression: import into an empty section selects a form and saves successfully.
   await library.getByRole('button',{name:'Розжиг и топливо',exact:true}).click();
   let count=await library.locator('.lk-template-choice').count();
@@ -92,7 +104,7 @@ try {
   await library.getByRole('button',{name:'Сохранить библиотеку',exact:true}).click();
   await page.waitForFunction(()=>demo.api.getCatalog().resources[0]?.id==='new-stock');
   assert.deepEqual(errors,[]);
-  console.log('Browser checks passed: panel, shutters, pause, switching, templates, resources, theme isolation, JSON import/export, item editor, empty-field and empty-import regressions.');
+  console.log('Browser checks passed: panel, shutters, pause, switching, templates, resources, theme isolation, JSON import/export, item editor, empty-field, empty-import and stale-fuel regressions.');
   console.log('Screenshots: '+output);
 } catch(error) {
   const page=browser.contexts()[0]?.pages()[0];

@@ -58,6 +58,14 @@ export function changedPaths(changes,prefix='') {
   return paths;
 }
 
+/** Match document fields, including Foundry's -= deletion syntax and whole-parent replacement. */
+export function touchesPath(paths,prefix) {
+  return paths.some(raw=>{
+    const path=raw.replace(/(^|\.)-=/g,'$1');
+    return path===prefix || path.startsWith(prefix+'.') || prefix.startsWith(path+'.');
+  });
+}
+
 /** A true checkpoint cannot hide a structural change merely by passing a custom option. */
 export function isClockUpdate(changes) {
   const paths=changedPaths(changes).filter(path=>path!=='_id' && !path.startsWith('_stats.'));
@@ -72,7 +80,7 @@ export function panelUpdateKind(event,token) {
   if(!event) return 'render';
   if(!token) return 'none';
   const doc=event.document, paths=changedPaths(event.changes);
-  const related=prefix=>paths.some(path=>path===prefix || path.startsWith(prefix+'.'));
+  const related=prefix=>touchesPath(paths,prefix);
   if(event.type==='scene') return token.parent?.id===doc.id?'render':'none';
   if(event.type==='deletedToken') return tokenKey(token)===tokenKey(doc) || (!!token.actor?.uuid && token.actor.uuid===doc.actor?.uuid)?'render':'none';
   if(event.type==='token') {

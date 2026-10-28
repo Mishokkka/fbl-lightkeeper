@@ -121,3 +121,76 @@ test('deleting an actor clears an infinite source without a polling timer',async
     await new Promise(resolve=>setTimeout(resolve,0));assert.equal(token.getFlag('fbl-lightkeeper','active'),null);
   } finally {await env.close();}
 });
+
+test('the panel uses the active recipe even after the Item changes to another mode',async()=>{
+  const env=await harness({active:1});
+  try {
+    const token=env.tokens[0],item=env.actors[0].items[0];
+    await token.update({'flags.fbl-lightkeeper.active.config.refillItem':'Топливо'});
+    env.actors[0].items[1].name='Топливо';
+    await item.update({'flags.fbl-lightkeeper.light.mode':'infinite','flags.fbl-lightkeeper.light.refillItem':'Другой запас'});
+    const panel=await env.api.open(token);
+    assert.match(panel.html,/data-action="refill"/);assert.match(panel.html,/1 шт\. Топливо/);
+  } finally {await env.close();}
+});
+
+test('without any GM the open panel freezes fuel and stops its local clock',async()=>{
+  const env=await harness({active:1,openPanel:true});
+  try {
+    const gm=env.users.get('GM');gm.active=false;await env.fire('userConnected',gm,false);
+    env.advance(60000);const panel=await env.api.open(env.tokens[0]);
+    assert.match(panel.html,/data-lk-clock>02:00:00</);assert.equal(env.intervals.size,0);
+  } finally {await env.close();}
+});
+
+test('editors for copied Item IDs use different Foundry application IDs',async()=>{
+  const env=await harness({active:2,inactive:0,inventory:1});
+  try {
+    const first=await env.api.configure(env.actors[0].items[0]);
+    const second=await env.api.configure(env.actors[1].items[0]);
+    assert.notEqual(first.options.id,second.options.id);
+  } finally {await env.close();}
+});
+
+test('applying an Item preset waits for its in-flight inventory checkpoint',async()=>{
+  const env=await harness({active:1,inactive:0});
+  let release;const work=[];
+  try {
+    const item=env.actors[0].items[0],update=item.update;
+    item.update=async function(changes,...args) {
+      if('flags.fbl-lightkeeper.light.remainingSeconds' in changes && !release) await new Promise(resolve=>{release=resolve;});
+      return update.call(this,changes,...args);
+    };
+    env.advance(5000);const checkpoint=env.tick();work.push(checkpoint);
+    while(!release) await Promise.resolve();
+    let applied=false;const applying=env.api.applyPreset(item,'flashlight').then(()=>{applied=true;});work.push(applying);
+    for(let i=0;i<20;i++) await Promise.resolve();assert.equal(applied,false);
+    release();await Promise.all(work);assert.equal(item.getFlag('fbl-lightkeeper','light').remainingSeconds,900);
+  } finally {release?.();await Promise.allSettled(work);await env.close();}
+});
+
+test('an in-flight checkpoint cannot resurrect a source cleared by actor reassignment',async()=>{
+  const env=await harness({active:1,inactive:0});
+  let release,checkpoint;
+  try {
+    const token=env.tokens[0],item=env.actors[0].items[0],update=item.update;
+    item.update=async function(...args) {await new Promise(resolve=>{release=resolve;});return update.apply(this,args);};
+    env.advance(5000);checkpoint=env.tick();while(!release) await Promise.resolve();
+    token.actor={id:'OTHER',uuid:'Actor.OTHER',items:new Map()};await token.update({actorId:'OTHER'});
+    await new Promise(resolve=>setTimeout(resolve,0));assert.equal(token.getFlag('fbl-lightkeeper','active'),null);
+    release();await checkpoint;assert.equal(token.getFlag('fbl-lightkeeper','active'),null);
+  } finally {release?.();await checkpoint;await env.close();}
+});
+
+test('Foundry flag deletions remove active indexes and stop all clocks',async()=>{
+  for(const namespace of [false,true]) {
+    const env=await harness({active:1,inactive:0,openPanel:true});
+    try {
+      const token=env.tokens[0];let changes;
+      if(namespace) {delete token.flags['fbl-lightkeeper'];changes={flags:{'-=fbl-lightkeeper':null}};}
+      else {delete token.flags['fbl-lightkeeper'].active;changes={flags:{'fbl-lightkeeper':{'-=active':null}}};}
+      await env.fire('updateToken',token,changes);await new Promise(resolve=>setTimeout(resolve,70));
+      assert.equal(env.intervals.size,0);
+    } finally {await env.close();}
+  }
+});

@@ -1,7 +1,7 @@
 import { MODULE_ID as NS, normalizeConfig, lightData, tickRemaining, displayTime, getQuantity, makeRuntime } from './logic.js';
 import {defaultCatalog,normalizeCatalog,PresetIndex} from './presets.js';
 import {createInterface} from './interface.js';
-import {ActiveSourceIndex,changedPaths,isClockUpdate} from './runtime.js';
+import {ActiveSourceIndex,changedPaths,isClockUpdate,touchesPath} from './runtime.js';
 
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[char]));
 const warning = message => ui.notifications.warn(`[Lightkeeper] ${message}`);
@@ -41,12 +41,23 @@ function isAuthority() {
 function getConfig(item) { return item ? identify(item).config : normalizeConfig(); }
 // getFlag returns live document data. Never mutate it before update succeeds.
 function activeState(token) { return clone(token.getFlag(NS, 'active') ?? null); }
+/** Fence async writes to the exact document revision read before the first await. */
+function sourceVersion(token) {
+  const state=token.getFlag(NS,'active');
+  const keys=['itemId','actorKey','lastAt','remainingSeconds'];
+  const values=state?keys.map(key=>state[key]):null;
+  return ()=>{
+    const current=token.getFlag(NS,'active');
+    return !!current && !!values && keys.every((key,i)=>Object.is(current[key],values[i]));
+  };
+}
 /** Read disposable remainders without mutating flags; merge the legacy single-stub format. */
-function stowedStates(token) {
+function stowedStates(token,{all=false}={}) {
   const saved = clone(token.getFlag(NS, 'stowedSources') ?? []);
   const legacy = token.getFlag(NS, 'stowed');
-  if (legacy && !saved.some(s => s.itemId === legacy.itemId)) saved.push(clone(legacy));
-  return saved.filter(s => s.remainingSeconds > 0);
+  if (legacy && !saved.some(s => s.itemId === legacy.itemId && s.actorKey===legacy.actorKey)) saved.push(clone(legacy));
+  const inventory=!all && saved.length?actorKey(token):null;
+  return saved.filter(s => s.remainingSeconds > 0 && (all || !s.actorKey || s.actorKey===inventory));
 }
 function availableItems(actor) { return actor?.items.filter(i => getConfig(i).enabled && getQuantity(i) > 0) ?? []; }
 /** Respect ownership and the world player-control switch for ordinary game actions. */
@@ -58,20 +69,24 @@ function actorKey(token) {
     ? `Scene.${token.parent.id}.Token.${token.id}.Actor.${token.actor?.id}` : `Actor.${token.actor?.id}`);
 }
 function lockKey(token) { return actorKey(token); }
-/** Serialize changes to one inventory while allowing unrelated actors to proceed concurrently. */
-async function withLock(token, callback) {
-  const key = lockKey(token);
+/** Serialize every module write to one inventory, including configuration and preset edits. */
+async function withQueue(key, callback) {
   const previous = locks.get(key) ?? Promise.resolve();
   const task = previous.catch(() => {}).then(callback);
   locks.set(key, task);
   try { return await task; } finally { if (locks.get(key) === task) locks.delete(key); }
 }
+function withLock(token,callback) { return withQueue(lockKey(token),callback); }
+function withItemLock(item,callback) { return withQueue(item.parent?.uuid ?? item.uuid ?? `Item.${item.id}`,callback); }
 function runningTank(token, itemId) {
   return activeSources.findTank(token,itemId);
 }
 /** Integrate pause boundaries even if document writes are still queued. */
 function remainingAt(runtime, now = Date.now()) {
-  let from = Math.max(runtime.lastAt, isAuthority() ? authoritySince : runtime.lastAt);
+  const authority=isAuthority();
+  // With no GM only the last committed fuel amount is authoritative.
+  if(!authorityId) return runtime.remainingSeconds;
+  let from = Math.max(runtime.lastAt, authority ? authoritySince : runtime.lastAt);
   let paused = pauseHistory[0]?.paused ?? game.paused;
   let remaining = runtime.remainingSeconds;
   for (const boundary of pauseHistory) {
@@ -108,13 +123,21 @@ async function updateToken(token, changes, options={}) {
   activeSources.sync(token); updateHeartbeat();
 }
 
+/** Chat is a post-commit side effect: transport failure must never roll back fuel or light. */
+async function announce(data) {
+  try { await ChatMessage.create(data); }
+  catch(error) { console.error(`[${NS}] Не удалось отправить уведомление о свете`,error); }
+}
+
 /** Persist fuel and restore light in one token transition; retain unexpired disposable stubs. */
-async function turnOff(token, runtime, {expired = false, discard = false} = {}) {
+async function turnOff(token, runtime, {expired = false, discard = false,valid=sourceVersion(token)} = {}) {
+  if(!valid() || !isAuthority()) return false;
   const item = token.actor?.items.get(runtime.itemId);
   if (runtime.config.mode === 'tank' && item && runtime.actorKey === actorKey(token)) {
     await saveRemaining(item,Math.max(0,runtime.remainingSeconds ?? 0));
   }
-  const stowed = stowedStates(token).filter(s => s.itemId !== runtime.itemId);
+  if(!valid() || !isAuthority()) return false;
+  const stowed = stowedStates(token,{all:true}).filter(s => s.itemId !== runtime.itemId || (s.actorKey && s.actorKey!==runtime.actorKey));
   if (!expired && !discard && isDisposable(runtime) && (runtime.remainingSeconds ?? 0) > 0) {
     stowed.push({itemId:runtime.itemId, itemName:runtime.itemName, config:runtime.config,
       actorKey:runtime.actorKey, remainingSeconds:runtime.remainingSeconds});
@@ -127,13 +150,15 @@ async function turnOff(token, runtime, {expired = false, discard = false} = {}) 
     [`flags.${NS}.stowedSources`]: stowed
   });
   if (expired && game.settings.get(NS, 'expiryChat')) {
-    await ChatMessage.create({content: `<p><strong>Источник света погас:</strong> ${escapeHtml(runtime.itemName)} (${escapeHtml(token.name)}).</p>`,
+    void announce({content: `<p><strong>Источник света погас:</strong> ${escapeHtml(runtime.itemName)} (${escapeHtml(token.name)}).</p>`,
       ...(token.hidden ? {whisper:game.users.filter(u => u.isGM).map(u => u.id)} : {})});
   }
+  return true;
 }
 
 /** Commit elapsed real seconds. Called exclusively by the elected GM. */
 async function settle(token) {
+  const valid=sourceVersion(token);
   const runtime = activeState(token);
   if (!runtime) return false;
   const item = token.actor?.items.get(runtime.itemId);
@@ -146,6 +171,7 @@ async function settle(token) {
   }
   const now = Date.now();
   if (runtime.config.mode === 'infinite') {
+    if(migrated) await updateToken(token,{[`flags.${NS}.active.actorKey`]:runtime.actorKey},{render:false});
     return false;
   }
   const next = remainingAt(runtime, now);
@@ -159,7 +185,9 @@ async function settle(token) {
   if (runtime.config.mode === 'tank' && item && changed) {
     await saveRemaining(item,runtime.remainingSeconds);
   }
-  if (runtime.remainingSeconds <= 0) { await turnOff(token, runtime, {expired: true}); return true; }
+  // Actor reassignment can invalidate this source through a different inventory queue while Item saves.
+  if(!valid() || actorKey(token)!==runtime.actorKey || !isAuthority()) return true;
+  if (runtime.remainingSeconds <= 0) { await turnOff(token, runtime, {expired: true,valid}); return true; }
   if (changed || clockChanged || warn || migrated) {
     const patch={ [`flags.${NS}.active.remainingSeconds`]:runtime.remainingSeconds,[`flags.${NS}.active.lastAt`]:now };
     if(warn) patch[`flags.${NS}.active.lowFuelWarned`]=true;
@@ -168,7 +196,7 @@ async function settle(token) {
   }
   if (warn) {
     const whisper=game.users.filter(user=>user.isGM || (!token.hidden && token.actor?.testUserPermission(user,'OWNER'))).map(user=>user.id);
-    await ChatMessage.create({whisper,content:`<div class="fbl-lk-message"><strong>Свет догорает</strong><p>${escapeHtml(runtime.itemName)} · ${escapeHtml(token.name)}<br>Осталось ${displayTime(next)}.</p></div>`});
+    void announce({whisper,content:`<div class="fbl-lk-message"><strong>Свет догорает</strong><p>${escapeHtml(runtime.itemName)} · ${escapeHtml(token.name)}<br>Осталось ${displayTime(next)}.</p></div>`});
   }
   return false;
 }
@@ -189,7 +217,7 @@ function activationPlan(token, itemId) {
     if (!config.enabled || getQuantity(item) < 1) throw new Error('Источник света недоступен.');
   }
   // Don't allow two linked tokens to drain the same actor item simultaneously.
-  if (config.mode === 'tank' && runningTank(token, itemId)) {
+  if (runningTank(token, itemId)) {
     throw new Error('Этот источник уже используется другим токеном того же персонажа.');
   }
   const remaining = resume ? stowed.remainingSeconds : config.remainingSeconds;
@@ -217,11 +245,12 @@ async function activate(token, itemId) {
     if (item && identify(item).origin==='recognized') await saveConfig(item,config);
     if (!resume && config.mode === 'disposable') { await updateQuantity(item,-1); spent.push(item); }
     if (config.ignitionMode === 'consume') { await updateQuantity(ignitionItem,-1); spent.push(ignitionItem); }
+    if(actorKey(token)!==runtime.actorKey || !isAuthority() || activeState(token)) throw new Error('Источник или персонаж изменился. Повторите действие.');
     runtime.lastAt = Date.now();
     await updateToken(token,{light:lightData(config), [`flags.${NS}.active`]:runtime,
       [`flags.${NS}.lastItemId`]:itemId,
       [`flags.${NS}.stowed`]:null,
-      [`flags.${NS}.stowedSources`]:stowedStates(token).filter(s => s.itemId !== itemId)});
+      [`flags.${NS}.stowedSources`]:stowedStates(token,{all:true}).filter(s => s.itemId !== itemId || (s.actorKey && s.actorKey!==runtime.actorKey))});
   } catch(error) {
     // Best-effort rollback if document update failed after inventory decrements.
     for (const resource of spent.reverse()) await updateQuantity(resource,1).catch(console.error);
@@ -235,36 +264,44 @@ async function switchOff(token) {
   if (!activeState(token)) throw new Error('У персонажа нет включённого источника.');
   const expired = await settle(token);
   if (expired) return 'Источник света погас.';
-  await turnOff(token, activeState(token));
+  if(!await turnOff(token, activeState(token))) throw new Error('Источник света изменился. Повторите действие.');
   return 'Источник света выключен.';
 }
 
 /** Refill the actual tank holder, preserving both stock and fuel if the token write fails. */
 async function refill(token, itemId) {
   const actor = token.actor;
+  const inventory=actorKey(token);
   const item = actor.items.get(itemId);
   if (!item) throw new Error('Предмет не найден.');
-  let config = getConfig(item);
+  const holder = runningTank(token, itemId);
+  if(holder) await settle(holder);
+  const current=holder?activeState(holder):null;
+  const valid=current?sourceVersion(holder):()=>!runningTank(token,itemId);
+  const config=current?.config ?? getConfig(item);
   if (!config.enabled || config.mode !== 'tank') throw new Error('Этот предмет нельзя заправлять.');
+  if (getQuantity(item) < 1) throw new Error('Источник света отсутствует в инвентаре.');
+  const initial=current?remainingAt(current):config.remainingSeconds;
+  if(initial>=config.capacitySeconds) throw new Error('Бак уже полный.');
   const fuel = resourceFor(actor,config.refillResource,config.refillItem,item.id);
   if (!fuel) throw new Error(`Нужен запас топлива: «${resourceLabel(config.refillResource,config.refillItem)}».`);
-  const holder = runningTank(token, itemId);
-  if (holder) {
-    const expired = await settle(holder);
-    if (expired) config = getConfig(item);
-  }
-  config = getConfig(item);
-  if (getQuantity(item) < 1) throw new Error('Источник света отсутствует в инвентаре.');
-  if (config.remainingSeconds >= config.capacitySeconds) throw new Error('Бак уже полный.');
-  await updateQuantity(fuel,-1);
-  const appliedAt = Date.now();
-  const runtime = holder ? activeState(holder) : null;
-  const remaining = runtime ? remainingAt(runtime,appliedAt) : config.remainingSeconds;
-  const result = Math.min(config.capacitySeconds, remaining + config.refillSeconds);
-  const before = clone(config);
+  const before=item.getFlag(NS,'light')?.remainingSeconds ?? getConfig(item).remainingSeconds;
+  const pin=!item.getFlag(NS,'light');
+  let spent=false,fuelSaved=false,result;
+  const check=()=>{
+    if(!valid() || actorKey(token)!==inventory || !isAuthority()) throw new Error('Источник или персонаж изменился. Повторите действие.');
+  };
   try {
-    config.remainingSeconds = result;
-    await saveConfig(item,config);
+    check();
+    await updateQuantity(fuel,-1);spent=true;check();
+    const appliedAt=Date.now(), runtime=current?activeState(holder):null;
+    const remaining=runtime?remainingAt(runtime,appliedAt):config.remainingSeconds;
+    result=Math.min(config.capacitySeconds,remaining+config.refillSeconds);
+    // Preserve pending Item edits; the active instance owns its recipe until extinguished.
+    if(pin) await saveConfig(item,{...config,remainingSeconds:result});
+    else await saveRemaining(item,result);
+    fuelSaved=true;
+    check();
     if (runtime?.itemId === itemId) {
       runtime.remainingSeconds = result;
       runtime.lastAt = appliedAt;
@@ -272,8 +309,8 @@ async function refill(token, itemId) {
       await updateToken(holder,{[`flags.${NS}.active`]:runtime});
     }
   } catch(error) {
-    await saveConfig(item,before).catch(console.error);
-    await updateQuantity(fuel,1).catch(console.error);
+    if(fuelSaved) await saveRemaining(item,before).catch(console.error);
+    if(spent) await updateQuantity(fuel,1).catch(console.error);
     throw error;
   }
   return `Заправлен: ${item.name}. Осталось ${displayTime(result)}.`;
@@ -283,7 +320,9 @@ async function refill(token, itemId) {
 async function shutter(token) {
   if (!activeState(token)?.config.shutter) throw new Error('У источника нет шторок.');
   if (await settle(token)) return 'Источник света погас.';
-  const runtime=activeState(token); runtime.shutterClosed=!runtime.shutterClosed;
+  const runtime=activeState(token);
+  if(!runtime || runtime.actorKey!==actorKey(token)) throw new Error('Источник света изменился. Повторите действие.');
+  runtime.shutterClosed=!runtime.shutterClosed;
   await updateToken(token,{light:runtime.shutterClosed?{...lightData(runtime.config),bright:0,dim:0}:lightData(runtime.config),[`flags.${NS}.active`]:runtime});
   return runtime.shutterClosed?'Шторки закрыты. Топливо продолжает расходоваться.':'Шторки открыты.';
 }
@@ -292,17 +331,23 @@ async function adjustTime(token,delta) {
   if (!Number.isFinite(delta) || Math.abs(delta)>86400) throw new Error('Некорректная поправка времени.');
   if (!activeState(token) || activeState(token).config.mode==='infinite') throw new Error('Нужен работающий источник с конечным запасом.');
   if (await settle(token)) return 'Источник уже погас. Заправьте или зажгите его заново.';
-  const runtime=activeState(token); const item=token.actor.items.get(runtime.itemId);
-  const before=item?getConfig(item):null;
+  const runtime=activeState(token);
+  if(!runtime || runtime.actorKey!==actorKey(token)) throw new Error('Источник света изменился. Повторите действие.');
+  const item=token.actor.items.get(runtime.itemId);
+  const valid=sourceVersion(token);
+  const before=item?.getFlag(NS,'light')?.remainingSeconds ?? runtime.remainingSeconds;
   runtime.remainingSeconds=Math.max(0,Math.min(runtime.config.capacitySeconds,runtime.remainingSeconds+delta));
   if (runtime.remainingSeconds>runtime.config.lowFuelSeconds) runtime.lowFuelWarned=false;
   try {
-    if (runtime.remainingSeconds<=0) await turnOff(token,runtime,{expired:true});
+    if (runtime.remainingSeconds<=0) {
+      if(!await turnOff(token,runtime,{expired:true,valid})) throw new Error('Источник света изменился. Повторите действие.');
+    }
     else {
-      if(runtime.config.mode==='tank' && item) await saveConfig(item,{...before,remainingSeconds:runtime.remainingSeconds});
+      if(runtime.config.mode==='tank' && item) await saveRemaining(item,runtime.remainingSeconds);
+      if(!valid() || actorKey(token)!==runtime.actorKey || !isAuthority()) throw new Error('Источник света изменился. Повторите действие.');
       await updateToken(token,{[`flags.${NS}.active`]:runtime});
     }
-  } catch(error) { if(before && runtime.config.mode==='tank') await saveConfig(item,before).catch(console.error); throw error; }
+  } catch(error) { if(item && runtime.config.mode==='tank') await saveRemaining(item,before).catch(console.error); throw error; }
   return `Осталось ${displayTime(runtime.remainingSeconds)}.`;
 }
 
@@ -315,14 +360,17 @@ async function doAction(request, userId) {
   if (!canOperate(user, token)) throw new Error('Нет доступа к этому токену.');
   if (!['on','off','refill','switch','shutter','adjust'].includes(request.action)) throw new Error('Неизвестное действие.');
   if (request.action==='adjust' && !user.isGM) throw new Error('Время корректирует ГМ.');
+  const inventory=actorKey(token);
   return withLock(token, async () => {
     if (!isAuthority() || !canOperate(game.users.get(userId),token)) throw new Error('Нет доступа к этому токену.');
+    if(actorKey(token)!==inventory) throw new Error('Персонаж токена изменился. Повторите действие.');
     if (request.action === 'on') return activate(token, request.itemId);
     if (request.action === 'off') return switchOff(token);
     if (request.action === 'switch') {
       if (activeState(token)?.itemId===request.itemId) return 'Этот источник уже горит.';
       activationPlan(token,request.itemId);
       if (activeState(token)) await switchOff(token);
+      if(actorKey(token)!==inventory || !canOperate(game.users.get(userId),token)) throw new Error('Персонаж токена изменился. Повторите действие.');
       return activate(token,request.itemId);
     }
     if (request.action === 'shutter') return shutter(token);
@@ -390,16 +438,17 @@ function viewModel(token) {
     const stowed=stowedStates(token);
     for(const item of availableItems(token.actor)) {
       if(stowed.some(s=>s.itemId===item.id)) continue;
-      const identified=identify(item); const c=identified.config;
-      const holder=c.mode==='tank'?runningTank(token,item.id):null;
+      const identified=identify(item), current=active?.itemId===item.id;
+      const holder=runningTank(token,item.id);
+      const held=holder && !current?activeState(holder):null;
+      const c=current?active.config:(held?.config ?? identified.config);
       let blocked='';
       if(getQuantity(item)<1) blocked='Нужна целая единица предмета';
       else if(c.mode!=='infinite' && c.remainingSeconds<=0) blocked='Сначала заправьте источник';
       else if(holder && holder!==token) blocked='Источник на другом токене';
       else if(c.ignitionMode!=='self' && !resourceFor(token.actor,c.ignitionResource,c.ignitionItem,item.id)) blocked='Нет розжига: '+resourceLabel(c.ignitionResource,c.ignitionItem);
       const fuel=resourceFor(token.actor,c.refillResource,c.refillItem,item.id);
-      const current=active?.itemId===item.id;
-      const remaining=current?active.remainingSeconds:c.remainingSeconds;
+      const remaining=current?active.remainingSeconds:held?remainingAt(held):c.remainingSeconds;
       sources.push({id:item.id,name:item.name,icon:identified.preset?.icon ?? (c.mode==='disposable'?'candle':'lantern'),
         active:current,blocked:current?'':blocked,detail:c.mode==='infinite'?'Без расхода':c.mode==='disposable'?
           (current?'Горит · '+displayTime(remaining)+' · запас ×'+getQuantity(item):'Запас ×'+getQuantity(item)+' · по '+displayTime(c.remainingSeconds)):displayTime(remaining),
@@ -539,12 +588,14 @@ async function resumeOnAuthorityChange() {
 /** Movement and unrelated token edits do not read runtime flags or rebuild any panel. */
 function onTokenUpdate(token,changes) {
   const paths=changedPaths(changes);
-  if(paths.some(path=>path.startsWith('flags.'+NS+'.active') || ['actorId','actorLink','delta'].some(key=>path===key || path.startsWith(key+'.')))) {
+  if(touchesPath(paths,`flags.${NS}.active`) || ['actorId','actorLink','delta'].some(key=>touchesPath(paths,key))) {
     activeSources.sync(token); updateHeartbeat(); prunePauseHistory();
   }
-  if(isAuthority() && paths.some(path=>['actorId','actorLink'].includes(path))) {
+  const identityChange=paths.some(path=>['actorId','actorLink'].includes(path)) ||
+    (!isClockUpdate(changes) && touchesPath(paths,`flags.${NS}.active`));
+  if(identityChange && isAuthority()) {
     const state=token.getFlag(NS,'active');
-    if(state && state.actorKey!==actorKey(token)) void withLock(token,()=>settle(token)).catch(console.error);
+    if(state?.actorKey && state.actorKey!==actorKey(token)) void withLock(token,()=>settle(token)).catch(console.error);
   }
   windows?.refresh({type:'token',document:token,changes});
 }
@@ -553,7 +604,7 @@ function onItemUpdate(item,changes={},options={}) {
   windows?.refresh({type:'item',document:item,changes});
   if(!isAuthority() || isClockUpdate(changes)) return;
   const paths=changedPaths(changes);
-  if(!options.deleted && !paths.some(path=>path==='system.quantity' || path.startsWith('flags.'+NS+'.light.enabled'))) return;
+  if(!options.deleted && !touchesPath(paths,'system.quantity') && !touchesPath(paths,`flags.${NS}.light`)) return;
   for(const token of activeSources.values()) {
     const state=token.getFlag(NS,'active');
     if(state.itemId!==item.id || token.actor?.uuid!==item.parent?.uuid || isDisposable(state)) continue;
@@ -578,8 +629,16 @@ Hooks.once('init',()=>{
   game.settings.register(NS,'autoRecognize',{name:'Распознавать источники по библиотеке',hint:'Предмет без своих настроек использует первый совпавший шаблон. При первом зажигании настройки закрепляются в предмете.',scope:'world',config:true,type:Boolean,default:true,onChange:()=>windows?.refresh()});
   game.settings.register(NS,'lowFuelNotify',{name:'Предупреждать о малом запасе',hint:'Одно сообщение владельцам и ГМу при достижении порога источника. Скрытые токены видят только ГМы.',scope:'world',config:true,type:Boolean,default:true});
   game.settings.register(NS,'catalog',{scope:'world',config:false,type:Object,default:defaultCatalog(),onChange:()=>{presetIndex=null;windows?.refresh();}});
-  windows=createInterface({catalog,identify,viewModel,active:activeView,timeLabel:displayTime,clockRunning:()=>!game.paused,resolveToken,action:requestAction,isGM:()=>game.user.isGM,info,warning,
-    async saveItem(item,config) { await saveConfig(item,config); windows.refresh(); info(`Настройки «${item.name}» сохранены.`); },
+  windows=createInterface({catalog,identify,viewModel,active:activeView,timeLabel:displayTime,clockRunning:()=>!game.paused && !!leadGM(),resolveToken,action:requestAction,isGM:()=>game.user.isGM,info,warning,
+    async saveItem(item,config,{remainingEdited=false}={}) {
+      await withItemLock(item,async()=>{
+        const patch={...config};
+        // Exclude untouched fuel from the update itself, so another client cannot be overwritten either.
+        if(!remainingEdited && item.getFlag(NS,'light')) delete patch.remainingSeconds;
+        await saveConfig(item,patch);
+      });
+      windows.refresh(); info(`Настройки «${item.name}» сохранены.`);
+    },
     async saveCatalog(value) {
       if(!game.user.isGM) throw new Error('Библиотеку настраивает ГМ.');
       await game.settings.set(NS,'catalog',normalizeCatalog(value)); presetIndex=null; windows.refresh();
@@ -622,7 +681,7 @@ Hooks.once('init',()=>{
   Hooks.on('preCreateToken',token=>{
     // A pasted token must not duplicate an already consumed candle or active tank.
     const runtime = activeState(token);
-    if (!runtime && !stowedStates(token).length) return;
+    if (!runtime && !stowedStates(token,{all:true}).length) return;
     token.updateSource({...(runtime ? {light:runtime.previousLight ?? {}} : {}),
       [`flags.${NS}.active`]:null,[`flags.${NS}.stowed`]:null,[`flags.${NS}.stowedSources`]:[]});
   });
@@ -638,7 +697,7 @@ Hooks.once('ready',async()=>{
     async applyPreset(item,id) {
       if(!game.user.isGM) throw new Error('Шаблон применяет ГМ.');
       const preset=presets().sourcesById.get(id); if(!preset) throw new Error('Шаблон не найден.');
-      await saveConfig(item,{...preset.config,remainingSeconds:preset.config.capacitySeconds}); windows.refresh();
+      await withItemLock(item,()=>saveConfig(item,{...preset.config,remainingSeconds:preset.config.capacitySeconds})); windows.refresh();
     }};
   await resumeOnAuthorityChange();
   Hooks.on('userConnected',resumeOnAuthorityChange);

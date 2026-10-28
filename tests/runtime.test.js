@@ -20,6 +20,7 @@ test('clock diffs tolerate server metadata but never hide structural changes',()
   assert.ok(isClockUpdate({[`flags.${NS}.light.remainingSeconds`]:3}));
   assert.equal(isClockUpdate({flags:{[NS]:{active:null}}}),false);
   assert.equal(isClockUpdate({flags:{[NS]:{active:{config:{dim:9},remainingSeconds:10}}}}),false);
+  assert.equal(isClockUpdate({flags:{[NS]:{active:{'-=lastAt':null}}}}),false);
 });
 
 test('movement filtering exits without resolving an unrelated token actor',()=>{
