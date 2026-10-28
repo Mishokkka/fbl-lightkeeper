@@ -1,0 +1,12 @@
+{
+  "id": "fbl-lightkeeper",
+  "title": "FBL Lightkeeper | Управление источниками света",
+  "description": "Источники света в предметах Forbidden Lands: зажигание, топливо, реальный таймер с паузой, заправка и управление через токен.",
+  "version": "0.1.0",
+  "authors": [{"name": "OpenAI"}],
+  "compatibility": {"minimum": "13", "maximum": "13"},
+  "esmodules": ["scripts/module.js"],
+  "styles": ["styles/lightkeeper.css"],
+  "relationships": {"systems": [{"id": "forbidden-lands", "type": "system"}]},
+  "languages": [{"lang": "ru", "name": "Русский", "path": "lang/ru.json"}]
+}
