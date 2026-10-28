@@ -1,0 +1,172 @@
+/* Lightkeeper owns its palette. No Foundry theme color variables are used. */
+:root .application.fbl-lk-window {
+  --lk-ink:#10191f; --lk-panel:#162229; --lk-raised:#1c2b33; --lk-input:#0c151b;
+  --lk-text:#eee7d8; --lk-muted:#a5b4bb; --lk-brass:#d6af70; --lk-line:#34434a;
+  --lk-green:#91c2a7; --lk-red:#eea299;
+  color-scheme:dark; color:var(--lk-text); background:var(--lk-ink); border:1px solid #536068;
+  border-radius:12px; box-shadow:0 22px 65px #00000080; font-family:'Segoe UI',sans-serif;
+  max-width:calc(100vw - 24px); min-width:340px;
+}
+:root .application.fbl-lk-window *, .fbl-lk-message * { box-sizing:border-box; }
+:root .application.fbl-lk-window .window-header { background:#0b1318; color:#c7d1d5; border-bottom:1px solid #34434a; border-radius:11px 11px 0 0; padding:9px 14px; }
+:root .application.fbl-lk-window .window-header .window-title { color:#c7d1d5; font:600 12px 'Segoe UI',sans-serif; letter-spacing:.04em; text-shadow:none; }
+:root .application.fbl-lk-window .window-header button, :root .application.fbl-lk-window .header-control { background:#0b1318; color:#c7d1d5; border:0; box-shadow:none; }
+:root .application.fbl-lk-window .window-header button:hover { background:#24343c; color:#f6dba6; }
+:root .application.fbl-lk-window .window-content { background:var(--lk-ink); color:var(--lk-text); padding:0; overflow:hidden; border-radius:0 0 11px 11px; }
+:root .application.fbl-lk-window :is(h1,h2,h3,h4,p,legend,label,strong,small,span,i) { color:inherit; text-shadow:none; }
+:root .application.fbl-lk-window :is(h1,h2,h3,h4) { color:var(--lk-text); border:0; margin:0; line-height:1.2; }
+:root .application.fbl-lk-window h2 { font:normal 25px Georgia,serif; letter-spacing:.01em; }
+:root .application.fbl-lk-window h3 { font:600 17px 'Segoe UI',sans-serif; }
+:root .application.fbl-lk-window h4 { font:600 14px 'Segoe UI',sans-serif; overflow-wrap:anywhere; }
+:root .application.fbl-lk-window p { color:var(--lk-muted); margin:0; line-height:1.5; font-size:12px; }
+:root .application.fbl-lk-window small { color:var(--lk-muted); font:11px/1.4 'Segoe UI',sans-serif; }
+:root .application.fbl-lk-window :is(button,input,select,textarea) { font:13px/1.3 'Segoe UI',sans-serif; box-shadow:none; text-shadow:none; }
+:root .application.fbl-lk-window ::selection { color:#0b1318; background:#e1bd82; }
+:root .application.fbl-lk-window :focus-visible { outline:2px solid #e1bd82; outline-offset:3px; box-shadow:none; }
+:root .application.fbl-lk-window :is(input,select,textarea) { color:var(--lk-text); background:var(--lk-input); border:1px solid #41535c; border-radius:6px; padding:9px 10px; width:100%; height:auto; min-height:36px; margin:0; }
+:root .application.fbl-lk-window :is(input,select,textarea):focus { border-color:#d6af70; background:#111f27; color:#fff4df; box-shadow:0 0 0 1px #d6af7040; }
+:root .application.fbl-lk-window input::placeholder, :root .application.fbl-lk-window textarea::placeholder { color:#7e939e; opacity:1; }
+:root .application.fbl-lk-window :is(input,select,textarea):disabled { color:#7b8a91; background:#19232a; border-color:#35434a; opacity:1; }
+:root .application.fbl-lk-window select option { color:#eee7d8; background:#142129; }
+:root .application.fbl-lk-window input[type='color'] { padding:4px; height:38px; cursor:pointer; }
+:root .application.fbl-lk-window input[type='checkbox'] { appearance:none; width:18px; height:18px; min-height:18px; flex:0 0 18px; padding:0; border-radius:4px; background:#0c151b; border:1px solid #70838d; }
+:root .application.fbl-lk-window input[type='checkbox']:checked { background:#d6af70; border-color:#d6af70; }
+:root .application.fbl-lk-window input[type='checkbox']:checked::after { content:'✓'; display:block; color:#152027; font:bold 14px/16px sans-serif; text-align:center; }
+:root .application.fbl-lk-window textarea { resize:vertical; line-height:1.5; min-height:76px; }
+:root .application.fbl-lk-window :is(button,.lk-button) { color:#e8dfce; background:#1e2e36; border:1px solid #4a5a62; border-radius:6px; padding:8px 12px; width:auto; height:auto; min-height:34px; margin:0; cursor:pointer; transition:background .12s,border-color .12s; }
+:root .application.fbl-lk-window :is(button,.lk-button):hover { background:#30434c; color:#fff4de; border-color:#c0a06e; box-shadow:none; }
+:root .application.fbl-lk-window .lk-button { display:inline-flex; align-items:center; justify-content:center; gap:7px; white-space:nowrap; }
+:root .application.fbl-lk-window .lk-button i { color:inherit; }
+:root .application.fbl-lk-window .lk-primary { background:#d6af70; color:#142027; border-color:#d6af70; font-weight:700; }
+:root .application.fbl-lk-window .lk-primary:hover { background:#ebc58a; color:#0b141a; border-color:#f4d6a5; }
+:root .application.fbl-lk-window .lk-quiet { background:#16232b; color:#c5d0d5; border-color:#41535c; }
+:root .application.fbl-lk-window .lk-link { color:#d6af70; background:transparent; border-color:transparent; }
+:root .application.fbl-lk-window .lk-link:hover { color:#f5d6a3; background:#24353d; border-color:#41535c; }
+:root .application.fbl-lk-window .lk-danger { color:#eea299; background:#2b2023; border-color:#704a4c; }
+:root .application.fbl-lk-window .lk-danger:hover { color:#ffd5cc; background:#512e32; border-color:#b37978; }
+:root .application.fbl-lk-window .lk-small { font-size:11px; min-height:27px; padding:4px 8px; }
+:root .application.fbl-lk-window button:disabled { color:#839198; background:#1b272e; border-color:#35454e; cursor:default; opacity:1; }
+:root .application.fbl-lk-window .lk-actions { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+:root .application.fbl-lk-window .lk-panel { padding:22px; display:flex; flex-direction:column; min-height:0; height:100%; gap:0; }
+:root .application.fbl-lk-window .lk-masthead { display:flex; gap:13px; align-items:center; padding:0 0 18px; flex-shrink:0; }
+:root .application.fbl-lk-window .lk-emblem { display:grid; place-items:center; width:43px; height:52px; flex:0 0 43px; color:#e4bd7d; background:linear-gradient(150deg,#344039,#19252c); border:1px solid #8c7857; border-radius:21px 21px 8px 8px; box-shadow:inset 0 0 16px #d6af7014; font-size:24px; }
+:root .application.fbl-lk-window .lk-eyebrow { color:#d6af70; font:700 10px/1.4 'Segoe UI',sans-serif; letter-spacing:.19em; margin:0 0 4px; }
+:root .application.fbl-lk-window .lk-subtitle { color:#9aadb7; font-size:11px; margin-top:4px; }
+:root .application.fbl-lk-window .lk-session { color:#c5d0d5; display:flex; align-items:center; gap:7px; font-size:11px; padding:10px 0 14px; border-top:1px solid #34434a; flex-shrink:0; }
+:root .application.fbl-lk-window .lk-session-note { color:#8fa4af; font-size:10px; margin-left:auto; }
+:root .application.fbl-lk-window .lk-dot { width:6px; height:6px; flex:0 0 6px; display:inline-block; background:#91c2a7; border-radius:50%; }
+:root .application.fbl-lk-window .lk-dot.lk-paused { background:#d6af70; }
+:root .application.fbl-lk-window .lk-burning { padding:17px; background:radial-gradient(ellipse at 15% 30%,#5f4b3029,transparent 70%),#1b282f; border:1px solid #806b4d; border-radius:10px; box-shadow:inset 0 1px 0 #e1bd8212; flex-shrink:0; }
+:root .application.fbl-lk-window .lk-burning-top { display:flex; align-items:center; justify-content:space-between; gap:10px; }
+:root .application.fbl-lk-window .lk-kicker { color:#c7ad83; font-size:9px; font-weight:700; letter-spacing:.15em; }
+:root .application.fbl-lk-window .lk-status { color:#b6d7c2; background:#22372f; border:1px solid #3d594d; border-radius:20px; padding:3px 8px; display:flex; align-items:center; gap:6px; font-size:10px; }
+:root .application.fbl-lk-window .lk-status.lk-muted { color:#b5c2ca; background:#24343d; border-color:#536771; }
+:root .application.fbl-lk-window .lk-muted .lk-dot { background:#96a7b1; }
+:root .application.fbl-lk-window .lk-burn-body { display:flex; align-items:center; gap:14px; margin:15px 0 10px; }
+:root .application.fbl-lk-window .lk-source-glyph { color:#e6bd7a; background:#3c3a2d; border:1px solid #726348; width:48px; height:48px; display:grid; place-items:center; border-radius:50%; font-size:23px; flex-shrink:0; }
+:root .application.fbl-lk-window .lk-burn-copy { min-width:0; }
+:root .application.fbl-lk-window .lk-burn-copy h3 { font-family:Georgia,serif; font-size:20px; font-weight:normal; overflow-wrap:anywhere; }
+:root .application.fbl-lk-window .lk-burn-copy p { color:#b8b7a9; font-size:11px; margin-top:5px; }
+:root .application.fbl-lk-window .lk-clock-row { display:flex; align-items:baseline; gap:12px; margin-bottom:9px; }
+:root .application.fbl-lk-window .lk-clock-row strong { color:#f2dcb5; font:normal 35px/1.2 'Consolas',monospace; font-variant-numeric:tabular-nums; letter-spacing:.015em; }
+:root .application.fbl-lk-window .lk-clock-row span { color:#b1b8b6; font-size:10px; }
+:root .application.fbl-lk-window .lk-meter { background:#0e191f; border:1px solid #34434a; border-radius:4px; height:6px; overflow:hidden; margin:0 0 15px; }
+:root .application.fbl-lk-window .lk-meter span { background:linear-gradient(90deg,#8a704a,#e3ba77); display:block; height:100%; transition:width .9s linear; }
+:root .application.fbl-lk-window .lk-low { border-color:#b36c61; }
+:root .application.fbl-lk-window .lk-low .lk-clock-row strong { color:#efb2a1; }
+:root .application.fbl-lk-window .lk-low .lk-meter span { background:#d89577; }
+:root .application.fbl-lk-window .lk-unlit { background:#17242c; border:1px dashed #4f616b; border-radius:10px; padding:22px; text-align:center; flex-shrink:0; }
+:root .application.fbl-lk-window .lk-unlit .lk-source-glyph { margin:0 auto 12px; color:#acb7bc; background:#24333b; border-color:#4f616b; }
+:root .application.fbl-lk-window .lk-unlit h3 { color:#d3d9d7; margin-bottom:8px; }
+:root .application.fbl-lk-window .lk-section-heading { display:flex; justify-content:space-between; align-items:center; padding:17px 0 8px; flex-shrink:0; }
+:root .application.fbl-lk-window .lk-section-heading h3 { color:#ddd9cb; font:normal 18px Georgia,serif; }
+:root .application.fbl-lk-window .lk-section-heading h3 span { color:#9cabb2; font:11px 'Segoe UI',sans-serif; padding-left:7px; }
+:root .application.fbl-lk-window .lk-search { display:flex; align-items:center; position:relative; margin-bottom:9px; flex-shrink:0; }
+:root .application.fbl-lk-window .lk-search i { position:absolute; color:#8fa5b0; left:11px; font-size:12px; }
+:root .application.fbl-lk-window .lk-search input { padding-left:32px; font-size:12px; }
+:root .application.fbl-lk-window .lk-sources { overflow-y:auto; min-height:80px; flex:1 1 auto; scrollbar-width:thin; scrollbar-color:#657578 #10191f; }
+:root .application.fbl-lk-window .lk-source-row { display:flex; gap:11px; align-items:flex-start; padding:14px 6px; border-bottom:1px solid #34434a; background:#10191f; }
+:root .application.fbl-lk-window .lk-source-row.lk-selected { background:#19272c; border-radius:6px; }
+:root .application.fbl-lk-window .lk-row-icon { width:32px; height:36px; display:grid; place-items:center; background:#24333a; color:#cdb180; border:1px solid #46545a; border-radius:6px; flex-shrink:0; font-size:16px; }
+:root .application.fbl-lk-window .lk-row-copy { flex:1; min-width:0; padding-top:1px; }
+:root .application.fbl-lk-window .lk-row-copy p { color:#d0ba96; font-size:11px; margin-top:5px; }
+:root .application.fbl-lk-window .lk-row-copy small { color:#91a5af; display:block; font-size:10px; margin-top:3px; }
+:root .application.fbl-lk-window .lk-row-actions { display:flex; flex-direction:column; align-items:stretch; gap:4px; flex:0 0 96px; }
+:root .application.fbl-lk-window .lk-row-actions .lk-button { font-size:11px; padding:5px 8px; min-height:28px; }
+:root .application.fbl-lk-window .lk-row-actions .lk-small { min-height:23px; padding:2px 5px; font-size:10px; }
+:root .application.fbl-lk-window .lk-empty { color:#9fadb4; text-align:center; padding:25px 15px; font-size:12px; line-height:1.6; }
+:root .application.fbl-lk-window .lk-gm-tools { display:flex; align-items:center; gap:6px; flex-wrap:wrap; padding-top:12px; flex-shrink:0; }
+:root .application.fbl-lk-window .lk-gm-tools>span { color:#b9a17c; font-size:10px; margin-right:auto; }
+:root .application.fbl-lk-window .lk-gm-tools small { color:#8d9fa9; font-size:9px; flex:1 0 100%; }
+:root .application.fbl-lk-window .lk-footer { display:flex; justify-content:space-between; gap:8px; border-top:1px solid #34434a; padding-top:11px; margin-top:12px; color:#8b9fa9; font-size:9px; flex-shrink:0; }
+:root .application.fbl-lk-window .lk-editor { padding:24px; }
+:root .application.fbl-lk-window .window-content>form { overflow:auto; min-height:0; margin:0; scrollbar-color:#657578 #10191f; }
+:root .application.fbl-lk-window .lk-preset-picker { display:flex; align-items:flex-end; gap:9px; padding:14px; background:#1b2a32; border:1px solid #41535c; border-radius:8px; margin-bottom:15px; }
+:root .application.fbl-lk-window .lk-preset-picker .lk-field { flex:1; }
+:root .application.fbl-lk-window .lk-grid { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:14px; }
+:root .application.fbl-lk-window .lk-field { display:flex; flex-direction:column; gap:6px; color:#d4d9d5; font-size:11px; margin:0; font-weight:normal; }
+:root .application.fbl-lk-window .lk-field>span { color:#cbd3d2; }
+:root .application.fbl-lk-window .lk-field small { color:#96a9b4; font-size:10px; }
+:root .application.fbl-lk-window .lk-check { display:flex; align-items:flex-start; gap:9px; color:#e1ddcf; font-size:12px; margin:15px 0; }
+:root .application.fbl-lk-window .lk-check small { display:block; color:#9baeb8; margin-top:4px; font-size:10px; }
+:root .application.fbl-lk-window .lk-fieldset { background:#142129; border:1px solid #344852; border-radius:8px; padding:16px; margin:18px 0; min-width:0; }
+:root .application.fbl-lk-window .lk-fieldset legend { color:#d6af70; background:#10191f; border:0; padding:0 7px; font:600 10px 'Segoe UI',sans-serif; letter-spacing:.08em; }
+:root .application.fbl-lk-window .lk-hint { color:#97abb5; font:11px/1.5 'Segoe UI',sans-serif; margin:12px 0; }
+:root .application.fbl-lk-window .lk-notice { color:#d5c5a7; background:#2e2c24; border:1px solid #756647; border-radius:6px; padding:11px 13px; margin-bottom:14px; font-size:11px; }
+:root .application.fbl-lk-window .lk-details { color:#c8d0cf; margin-top:12px; }
+:root .application.fbl-lk-window .lk-details summary { color:#bfb08e; cursor:pointer; font-size:11px; margin-bottom:10px; }
+:root .application.fbl-lk-window .lk-library { display:flex; flex-direction:column; height:100%; min-height:0; padding:22px 24px 0; }
+:root .application.fbl-lk-window .lk-library-toolbar { display:flex; align-items:center; justify-content:space-between; gap:10px; border-top:1px solid #34434a; border-bottom:1px solid #34434a; padding:11px 0; flex-shrink:0; }
+:root .application.fbl-lk-window .lk-tabs { display:flex; gap:3px; }
+:root .application.fbl-lk-window .lk-tabs .lk-button { background:transparent; color:#a5b4bb; border-color:transparent; font-size:12px; }
+:root .application.fbl-lk-window .lk-tabs .lk-tab-active { color:#f1d2a0; background:#293234; border-color:#776648; }
+:root .application.fbl-lk-window .lk-library-body { display:grid; grid-template-columns:205px minmax(0,1fr); gap:22px; min-height:0; flex:1; }
+:root .application.fbl-lk-window .lk-library-list { overflow:auto; padding:16px 0; border-right:1px solid #34434a; padding-right:16px; scrollbar-color:#657578 #10191f; }
+:root .application.fbl-lk-window .lk-template-choice { display:flex; align-items:center; gap:10px; background:transparent; border:1px solid transparent; width:100%; text-align:left; padding:11px 9px; margin-bottom:5px; color:#c6d0d2; white-space:normal; }
+:root .application.fbl-lk-window .lk-template-choice>i { color:#b7a582; font-size:15px; width:16px; text-align:center; flex-shrink:0; }
+:root .application.fbl-lk-window .lk-template-choice>span { font-size:12px; color:inherit; overflow-wrap:anywhere; }
+:root .application.fbl-lk-window .lk-template-choice small { display:block; color:#91a6b1; font-size:9px; margin-top:5px; }
+:root .application.fbl-lk-window .lk-template-choice.lk-selected { color:#f3d7a6; background:#2d322f; border-color:#8a744f; }
+:root .application.fbl-lk-window .lk-library-editor { overflow:auto; padding:18px 3px 18px 0; scrollbar-color:#657578 #10191f; }
+:root .application.fbl-lk-window .lk-editor-heading { display:flex; align-items:center; gap:10px; margin-bottom:18px; }
+:root .application.fbl-lk-window .lk-editor-heading h3 { flex:1; color:#e4ddcb; font:normal 21px Georgia,serif; }
+:root .application.fbl-lk-window .lk-library-footer { background:#10191f; border-top:1px solid #34434a; padding:13px 0 16px; display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; flex-shrink:0; }
+:root .application.fbl-lk-window .lk-save-state { color:#a9b9bf; font-size:10px; }
+:root .application.fbl-lk-window [hidden] { display:none !important; }
+:root .application.fbl-lk-window.lk-busy .lk-button { pointer-events:none; }
+:root .application.fbl-lk-window ::-webkit-scrollbar { width:7px; height:7px; background:#10191f; }
+:root .application.fbl-lk-window ::-webkit-scrollbar-thumb { background:#536872; border-radius:5px; }
+.fbl-lk-token-button.control-icon, .fbl-lk-sheet-button {
+  background:#14212a !important; color:#d6af70 !important; border:1px solid #8b7551 !important;
+  box-shadow:none !important; cursor:pointer; border-radius:6px; text-shadow:none;
+}
+.fbl-lk-token-button.control-icon:hover, .fbl-lk-sheet-button:hover { background:#344348 !important; color:#ffe0aa !important; }
+.fbl-lk-token-button.control-icon i, .fbl-lk-sheet-button i { color:inherit !important; }
+.fbl-lk-token-button.control-icon.lk-on { background:#584932 !important; color:#ffe0aa !important; }
+.fbl-lk-sheet-button { width:26px !important; height:26px !important; min-height:26px !important; flex:0 0 26px; padding:3px !important; margin:0 4px 0 0 !important; font-size:12px !important; line-height:18px !important; }
+.fbl-lk-message { background:#142129; color:#eee7d8; border:1px solid #8c744e; border-radius:8px; padding:12px 14px; font:13px/1.5 'Segoe UI',sans-serif; }
+.fbl-lk-message strong { color:#e8c28a; }
+.fbl-lk-message p { color:#c8d2d4; margin:6px 0 0; }
+@media(max-width:680px) {
+  :root .application.fbl-lk-window .lk-library-body { grid-template-columns:150px minmax(0,1fr); gap:12px; }
+  :root .application.fbl-lk-window .lk-grid { grid-template-columns:1fr; }
+  :root .application.fbl-lk-window .lk-panel, :root .application.fbl-lk-window .lk-library, :root .application.fbl-lk-window .lk-editor { padding:16px; }
+  :root .application.fbl-lk-window .lk-session-note { display:none; }
+}
+
+/* Keep at least two inventory rows accessible on compact displays. */
+:root .application.fbl-lk-window { max-height:calc(100vh - 52px); }
+:root .application.fbl-lk-window .lk-panel { overflow-y:auto; padding:18px 20px; scrollbar-color:#657578 #10191f; }
+:root .application.fbl-lk-window .lk-masthead { padding-bottom:14px; }
+:root .application.fbl-lk-window .lk-emblem svg { width:27px; height:36px; }
+:root .application.fbl-lk-window .lk-burning { padding:14px 16px; }
+:root .application.fbl-lk-window .lk-burn-body { margin:10px 0 6px; }
+:root .application.fbl-lk-window .lk-burn-body .lk-source-glyph { width:40px; height:40px; font-size:20px; }
+:root .application.fbl-lk-window .lk-clock-row strong { font-size:32px; }
+:root .application.fbl-lk-window .lk-sources { min-height:155px; flex:1 0 155px; }
+:root .application.fbl-lk-window .lk-gm-tools small { flex:1; font-size:9px; }
+
+:root .application.fbl-lk-window .window-content>.lk-item-form { height:100%; overflow:hidden; }
+:root .application.fbl-lk-window .lk-editor { height:100%; min-height:0; display:flex; flex-direction:column; padding-bottom:0; }
+:root .application.fbl-lk-window .lk-item-scroll { flex:1; min-height:0; overflow:auto; padding-right:3px; scrollbar-color:#657578 #10191f; }
+:root .application.fbl-lk-window .lk-editor-footer { flex-shrink:0; background:#10191f; border-top:1px solid #34434a; padding:14px 0 18px; }

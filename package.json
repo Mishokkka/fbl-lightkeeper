@@ -1,0 +1,7 @@
+{
+  "name": "fbl-lightkeeper",
+  "version": "0.2.3",
+  "type": "module",
+  "private": true,
+  "scripts": {"test": "node --test", "preview": "node tests/preview-server.mjs", "benchmark":"node tests/benchmark.mjs"}
+}
