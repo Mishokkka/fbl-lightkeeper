@@ -2,7 +2,7 @@
   "id": "fbl-lightkeeper",
   "title": "FBL Lightkeeper | Управление источниками света",
   "description": "Источники света в предметах Forbidden Lands: зажигание, топливо, реальный таймер с паузой, заправка и управление через токен.",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "url": "https://github.com/Mishokkka/fbl-lightkeeper",
   "bugs": "https://github.com/Mishokkka/fbl-lightkeeper/issues",
   "readme": "README.md",

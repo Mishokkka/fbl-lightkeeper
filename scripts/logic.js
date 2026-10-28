@@ -2,8 +2,9 @@
 export const MODULE_ID = 'fbl-lightkeeper';
 export const MODES = Object.freeze(['infinite', 'tank', 'disposable']);
 export const IGNITION = Object.freeze(['self', 'require', 'consume']);
-/** Coerce a finite numeric value and clamp it to a supported range. */
+/** Use defaults for missing numbers; retain explicit zero and clamp finite numeric values. */
 const limit = (value, min, max, fallback) => {
+  if(value===null || value===undefined || (typeof value==='string' && value.trim()==='')) return fallback;
   const n = Number(value);
   return Number.isFinite(n) ? Math.max(min, Math.min(max, n)) : fallback;
 };

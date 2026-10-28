@@ -60,3 +60,12 @@ test('catalog normalization does not mutate its source and rejects duplicate IDs
   assert.equal(raw.sources[0].config.templateId,undefined);
   assert.throws(()=>normalizeCatalog({sources:[{id:'same'},{id:'same'}]}),/Повторяется ID/);
 });
+
+test('JSON source presets with missing numbers keep useful light, fuel and warning defaults',()=>{
+  const raw=JSON.parse('{"version":1,"sources":[{"id":"imported","names":["Лампа врача"],"config":{"capacitySeconds":null,"refillSeconds":" ","bright":null,"dim":"","lowFuelSeconds":null}}],"resources":[]}');
+  const catalog=normalizeCatalog(raw), source=new PresetIndex(catalog).identify(item('Лампа врача'));
+  assert.equal(source.origin,'recognized');assert.equal(source.config.capacitySeconds,1800);
+  assert.equal(source.config.remainingSeconds,1800);assert.equal(source.config.refillSeconds,900);
+  assert.equal(source.config.bright,3);assert.equal(source.config.dim,6);assert.equal(source.config.lowFuelSeconds,60);
+  assert.equal(raw.sources[0].config.capacitySeconds,null);
+});

@@ -7,6 +7,23 @@ test('normalization clamps and handles invalid fields', () => {
   assert.equal(lightData(c).bright, 30); assert.equal(lightData(c).dim, 30);
 });
 
+for(const [name,value] of [['null',null],['undefined',undefined],['empty string',''],['whitespace',' \t\n ']]) {
+  test(`missing numeric settings (${name}) keep source defaults`,()=>{
+    const fields=['capacitySeconds','remainingSeconds','refillSeconds','lowFuelSeconds','bright','dim','angle','alpha','animationSpeed','animationIntensity'];
+    assert.deepEqual(normalizeConfig(Object.fromEntries(fields.map(field=>[field,value]))),normalizeConfig());
+  });
+}
+
+test('explicit numeric zero and numeric strings retain their intended meaning',()=>{
+  for(const zero of [0,'0']) {
+    const c=normalizeConfig({capacitySeconds:zero,remainingSeconds:zero,refillSeconds:zero,lowFuelSeconds:zero,bright:zero,dim:zero,angle:zero,alpha:zero,animationSpeed:zero,animationIntensity:zero});
+    for(const field of ['remainingSeconds','lowFuelSeconds','bright','dim','alpha']) assert.equal(c[field],0,field);
+    for(const field of ['capacitySeconds','refillSeconds','angle','animationSpeed','animationIntensity']) assert.equal(c[field],1,field);
+  }
+  const c=normalizeConfig({capacitySeconds:'120',remainingSeconds:'30.125',bright:'2.5'});
+  assert.equal(c.capacitySeconds,120);assert.equal(c.remainingSeconds,30.125);assert.equal(c.bright,2.5);
+});
+
 test('fractional fuel survives normalization and repeated switches', () => {
   assert.equal(normalizeConfig({capacitySeconds:100,remainingSeconds:99.125}).remainingSeconds,99.125);
   assert.equal(normalizeConfig(null).capacitySeconds,1800);
