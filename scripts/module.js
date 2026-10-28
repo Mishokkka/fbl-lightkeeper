@@ -1,6 +1,7 @@
-import { MODULE_ID as NS, normalizeConfig, lightData, tickRemaining, displayTime, getQuantity, findNamedItem, makeRuntime } from './logic.js';
+import { MODULE_ID as NS, normalizeConfig, lightData, tickRemaining, displayTime, getQuantity, makeRuntime } from './logic.js';
+import {defaultCatalog,normalizeCatalog,identifySource,findResource} from './presets.js';
+import {createInterface} from './interface.js';
 
-const DIALOG = () => foundry.applications.api.DialogV2;
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[char]));
 const warning = message => ui.notifications.warn(`[Lightkeeper] ${message}`);
 const info = message => ui.notifications.info(`[Lightkeeper] ${message}`);
@@ -12,6 +13,10 @@ let heartbeat = null;
 let authorityId = null;
 let authoritySince = 0;
 let pauseHistory = [];
+let windows = null;
+let clockTicker = null;
+const catalog = () => normalizeCatalog(game.settings.get(NS,'catalog') ?? defaultCatalog());
+const identify = item => identifySource(item,catalog(),game.settings.get(NS,'autoRecognize') !== false);
 
 function leadGM() {
   return game.users.filter(u => u.isGM && u.active).sort((a,b) => a.id.localeCompare(b.id))[0] ?? null;
@@ -24,7 +29,7 @@ function isAuthority() {
   }
   return next === game.user.id;
 }
-function getConfig(item) { return normalizeConfig(item?.getFlag(NS, 'light') ?? {}); }
+function getConfig(item) { return item ? identify(item).config : normalizeConfig(); }
 // getFlag returns live document data. Never mutate it before update succeeds.
 function activeState(token) { return clone(token.getFlag(NS, 'active') ?? null); }
 function stowedStates(token) {
@@ -128,17 +133,23 @@ async function settle(token) {
   const clockChanged = runtime.lastAt !== now;
   runtime.remainingSeconds = Math.max(0, next);
   runtime.lastAt = now;
+  const warn = next>0 && runtime.config.lowFuelSeconds>0 && next<=runtime.config.lowFuelSeconds &&
+    !runtime.lowFuelWarned && game.settings.get(NS,'lowFuelNotify');
+  if (warn) runtime.lowFuelWarned=true;
   if (runtime.config.mode === 'tank' && item && changed) {
     const c = getConfig(item); c.remainingSeconds = runtime.remainingSeconds;
     await saveConfig(item,c);
   }
   if (runtime.remainingSeconds <= 0) { await turnOff(token, runtime, {expired: true}); return true; }
-  if (changed || clockChanged) await updateToken(token,{[`flags.${NS}.active`]:runtime});
+  if (changed || clockChanged || warn) await updateToken(token,{[`flags.${NS}.active`]:runtime});
+  if (warn) {
+    const whisper=game.users.filter(user=>user.isGM || (!token.hidden && token.actor?.testUserPermission(user,'OWNER'))).map(user=>user.id);
+    await ChatMessage.create({whisper,content:`<div class="fbl-lk-message"><strong>Свет догорает</strong><p>${escapeHtml(runtime.itemName)} · ${escapeHtml(token.name)}<br>Осталось ${displayTime(next)}.</p></div>`});
+  }
   return false;
 }
 
-async function activate(token, itemId) {
-  if (activeState(token)) throw new Error('Сначала погасите текущий источник света.');
+function activationPlan(token, itemId) {
   const actor = token.actor;
   const stowed = stowedStates(token).find(s => s.itemId === itemId);
   let item = actor.items.get(itemId);
@@ -160,18 +171,29 @@ async function activate(token, itemId) {
   if (config.mode !== 'infinite' && remaining <= 0) throw new Error('Топливо или заряд закончились.');
   let ignitionItem = null;
   if (config.ignitionMode !== 'self') {
-    ignitionItem = findNamedItem(actor, config.ignitionItem, itemId);
-    if (!ignitionItem) throw new Error(`Для включения нужен предмет «${config.ignitionItem || 'не указан'}».`);
+    ignitionItem = findResource(actor,config.ignitionResource,config.ignitionItem,catalog(),itemId);
+    if (!ignitionItem) throw new Error(`Для включения нужен предмет розжига: «${resourceLabel(config.ignitionResource,config.ignitionItem)}».`);
   }
+  return {item,config,remaining,resume,stowed,ignitionItem};
+}
+function resourceLabel(id,fallback) { return (catalog().resources.find(r=>r.id===id)?.label ?? fallback) || 'не задан'; }
+async function activate(token, itemId) {
+  if (activeState(token)) throw new Error('Сначала погасите текущий источник света.');
+  const {item,config,remaining,resume,stowed,ignitionItem}=activationPlan(token,itemId);
+  const actor=token.actor;
   const previous = previousLight(token);
   const runtime = makeRuntime(item ?? {id:itemId,name:stowed.itemName,parent:actor}, config, previous, Date.now(), remaining);
   runtime.actorKey = actorKey(token);
+  runtime.icon = (item?identify(item).preset?.icon:null) ?? (config.mode==='disposable'?'candle':'lantern');
   const spent = [];
   try {
+    // First use freezes the recognized template so later library edits cannot refill a running lamp.
+    if (item && identify(item).origin==='recognized') await saveConfig(item,config);
     if (!resume && config.mode === 'disposable') { await updateQuantity(item,-1); spent.push(item); }
     if (config.ignitionMode === 'consume') { await updateQuantity(ignitionItem,-1); spent.push(ignitionItem); }
     runtime.lastAt = Date.now();
     await updateToken(token,{light:lightData(config), [`flags.${NS}.active`]:runtime,
+      [`flags.${NS}.lastItemId`]:itemId,
       [`flags.${NS}.stowed`]:null,
       [`flags.${NS}.stowedSources`]:stowedStates(token).filter(s => s.itemId !== itemId)});
   } catch(error) {
@@ -196,8 +218,8 @@ async function refill(token, itemId) {
   if (!item) throw new Error('Предмет не найден.');
   let config = getConfig(item);
   if (!config.enabled || config.mode !== 'tank') throw new Error('Этот предмет нельзя заправлять.');
-  const fuel = findNamedItem(actor, config.refillItem, item.id);
-  if (!fuel) throw new Error(`Нужен запас топлива: «${config.refillItem || 'не задан'}».`);
+  const fuel = findResource(actor,config.refillResource,config.refillItem,catalog(),item.id);
+  if (!fuel) throw new Error(`Нужен запас топлива: «${resourceLabel(config.refillResource,config.refillItem)}».`);
   const holder = runningTank(token, itemId);
   if (holder) {
     const expired = await settle(holder);
@@ -218,6 +240,7 @@ async function refill(token, itemId) {
     if (runtime?.itemId === itemId) {
       runtime.remainingSeconds = result;
       runtime.lastAt = appliedAt;
+      if (result>runtime.config.lowFuelSeconds) runtime.lowFuelWarned=false;
       await updateToken(holder,{[`flags.${NS}.active`]:runtime});
     }
   } catch(error) {
@@ -228,24 +251,58 @@ async function refill(token, itemId) {
   return `Заправлен: ${item.name}. Осталось ${displayTime(result)}.`;
 }
 
+async function shutter(token) {
+  if (!activeState(token)?.config.shutter) throw new Error('У источника нет шторок.');
+  if (await settle(token)) return 'Источник света погас.';
+  const runtime=activeState(token); runtime.shutterClosed=!runtime.shutterClosed;
+  await updateToken(token,{light:runtime.shutterClosed?{...lightData(runtime.config),bright:0,dim:0}:lightData(runtime.config),[`flags.${NS}.active`]:runtime});
+  return runtime.shutterClosed?'Шторки закрыты. Топливо продолжает расходоваться.':'Шторки открыты.';
+}
+async function adjustTime(token,delta) {
+  if (!Number.isFinite(delta) || Math.abs(delta)>86400) throw new Error('Некорректная поправка времени.');
+  if (!activeState(token) || activeState(token).config.mode==='infinite') throw new Error('Нужен работающий источник с конечным запасом.');
+  if (await settle(token)) return 'Источник уже погас. Заправьте или зажгите его заново.';
+  const runtime=activeState(token); const item=token.actor.items.get(runtime.itemId);
+  const before=item?getConfig(item):null;
+  runtime.remainingSeconds=Math.max(0,Math.min(runtime.config.capacitySeconds,runtime.remainingSeconds+delta));
+  if (runtime.remainingSeconds>runtime.config.lowFuelSeconds) runtime.lowFuelWarned=false;
+  try {
+    if (runtime.remainingSeconds<=0) await turnOff(token,runtime,{expired:true});
+    else {
+      if(runtime.config.mode==='tank' && item) await saveConfig(item,{...before,remainingSeconds:runtime.remainingSeconds});
+      await updateToken(token,{[`flags.${NS}.active`]:runtime});
+    }
+  } catch(error) { if(before && runtime.config.mode==='tank') await saveConfig(item,before).catch(console.error); throw error; }
+  return `Осталось ${displayTime(runtime.remainingSeconds)}.`;
+}
+
 async function doAction(request, userId) {
   if (!isAuthority()) throw new Error('Управление передано другому ГМу. Повторите действие.');
   if (!request || typeof request !== 'object') throw new Error('Некорректный запрос.');
   const user = game.users.get(userId);
   const token = resolveToken(request.sceneId, request.tokenId);
   if (!canOperate(user, token)) throw new Error('Нет доступа к этому токену.');
-  if (!['on','off','refill'].includes(request.action)) throw new Error('Неизвестное действие.');
+  if (!['on','off','refill','switch','shutter','adjust'].includes(request.action)) throw new Error('Неизвестное действие.');
+  if (request.action==='adjust' && !user.isGM) throw new Error('Время корректирует ГМ.');
   return withLock(token, async () => {
     if (!isAuthority() || !canOperate(game.users.get(userId),token)) throw new Error('Нет доступа к этому токену.');
     if (request.action === 'on') return activate(token, request.itemId);
     if (request.action === 'off') return switchOff(token);
+    if (request.action === 'switch') {
+      if (activeState(token)?.itemId===request.itemId) return 'Этот источник уже горит.';
+      activationPlan(token,request.itemId);
+      if (activeState(token)) await switchOff(token);
+      return activate(token,request.itemId);
+    }
+    if (request.action === 'shutter') return shutter(token);
+    if (request.action === 'adjust') return adjustTime(token,Number(request.deltaSeconds));
     return refill(token, request.itemId);
   });
 }
-async function requestAction(token, action, itemId = '') {
+async function requestAction(token, action, itemId = '', options = {}) {
   const gm = leadGM();
   if (!gm) { warning('Для управления светом необходим подключённый ГМ.'); return; }
-  const request = {action, itemId, sceneId:token.parent.id, tokenId:token.id};
+  const request = {action, itemId, sceneId:token.parent.id, tokenId:token.id,...(action==='adjust'?{deltaSeconds:options.deltaSeconds}: {})};
   try {
     let result;
     if (isAuthority()) result = await doAction(request, game.user.id);
@@ -262,6 +319,7 @@ async function requestAction(token, action, itemId = '') {
       });
     }
     info(result);
+    windows?.refresh();
     return result;
   } catch(e) { warning(e.message); console.error(`[${NS}]`,e); return null; }
 }
@@ -286,94 +344,93 @@ async function onUserUpdate(user, changes, _options, userId) {
   await user.setFlag(NS,'result',result).catch(error => console.error(`[${NS}] Ошибка отправки ответа`,error));
 }
 
-function input(name, label, value, type='text', extras='') {
-  return `<label>${escapeHtml(label)}<input name="${name}" type="${type}" value="${escapeHtml(value)}" ${extras}></label>`;
+function activeView(token) {
+  const state=token?activeState(token):null;
+  return state?{...state,remainingSeconds:state.config.mode==='infinite'?null:remainingAt(state)}:null;
 }
-function select(name,label,value,items) {
-  return `<label>${escapeHtml(label)}<select name="${name}">${items.map(([k,l]) => `<option value="${k}" ${value===k?'selected':''}>${escapeHtml(l)}</option>`).join('')}</select></label>`;
+function viewModel(token) {
+  const active=activeView(token);
+  const sources=[];
+  if(token?.actor) {
+    const stowed=stowedStates(token);
+    for(const item of availableItems(token.actor)) {
+      if(stowed.some(s=>s.itemId===item.id)) continue;
+      const identified=identify(item); const c=identified.config;
+      let blocked='';
+      if(getQuantity(item)<1) blocked='Нужна целая единица предмета';
+      else if(c.mode!=='infinite' && c.remainingSeconds<=0) blocked='Сначала заправьте источник';
+      else if(c.mode==='tank' && runningTank(token,item.id) && runningTank(token,item.id)!==token) blocked='Источник на другом токене';
+      else if(c.ignitionMode!=='self' && !findResource(token.actor,c.ignitionResource,c.ignitionItem,catalog(),item.id)) blocked='Нет розжига: '+resourceLabel(c.ignitionResource,c.ignitionItem);
+      const fuel=findResource(token.actor,c.refillResource,c.refillItem,catalog(),item.id);
+      const current=active?.itemId===item.id;
+      const remaining=current?active.remainingSeconds:c.remainingSeconds;
+      sources.push({id:item.id,name:item.name,icon:identified.preset?.icon ?? (c.mode==='disposable'?'candle':'lantern'),
+        active:current,blocked:current?'':blocked,detail:c.mode==='infinite'?'Без расхода':c.mode==='disposable'?
+          (current?'Горит · '+displayTime(remaining)+' · запас ×'+getQuantity(item):'Запас ×'+getQuantity(item)+' · по '+displayTime(c.remainingSeconds)):displayTime(remaining),
+        originLabel:identified.origin==='recognized'?'Шаблон: '+identified.preset.label:identified.preset?.label ?? 'Свои настройки',
+        refillable:c.mode==='tank',refillBlocked:!fuel?'Нет топлива: '+resourceLabel(c.refillResource,c.refillItem):remaining>=c.capacitySeconds?'Бак полный':'',
+        refillHint:'1 шт. '+resourceLabel(c.refillResource,c.refillItem)+' → '+displayTime(c.refillSeconds)});
+    }
+    for(const s of stowed) {
+      const c=normalizeConfig(s.config);
+      const missing=c.ignitionMode!=='self' && !findResource(token.actor,c.ignitionResource,c.ignitionItem,catalog(),s.itemId);
+      sources.push({id:s.itemId,name:s.itemName+' · огарок',icon:'candle',active:false,refillable:false,
+        detail:displayTime(s.remainingSeconds),originLabel:'Уже списан из стопки',blocked:missing?'Нет розжига: '+resourceLabel(c.ignitionResource,c.ignitionItem):''});
+    }
+    // A burning disposable may have consumed the last unit in the inventory.
+    if(active && !sources.some(s=>s.id===active.itemId)) sources.unshift({id:active.itemId,name:active.itemName,icon:active.icon ?? 'candle',active:true,detail:displayTime(active.remainingSeconds),originLabel:'Горящий экземпляр',refillable:false});
+  }
+  return {tokenName:token?.name,active,sources,gm:game.user.isGM,paused:game.paused,authority:!!leadGM(),canOperate:canOperate(game.user,token)};
 }
-async function configureItem(item) {
-  if (!game.user.isGM) return warning('Только ГМ может настраивать источники света.');
-  if (item?.documentName !== 'Item') return warning('Сначала откройте карточку предмета.');
-  const c = getConfig(item);
-  const content = `<div class="fbl-lk-dialog">
-    <p><strong>${escapeHtml(item.name)}</strong> · настройки сохраняются в самом предмете и передаются через Item Piles.</p>
-    <label class="lk-check"><input type="checkbox" name="enabled" ${c.enabled?'checked':''}> Это источник света</label>
-    <div class="lk-section">Свет</div><div class="lk-grid">
-      ${input('bright','Яркий свет (ед. сцены)',c.bright,'number','min="0" max="200" step="0.5"')}
-      ${input('dim','Тусклый свет (ед. сцены)',c.dim,'number','min="0" max="200" step="0.5"')}
-      ${input('angle','Угол луча (1–360°)',c.angle,'number','min="1" max="360"')}
-      ${input('color','Цвет, например #ffba70',c.color,'text','pattern="#[A-Fa-f0-9]{6}"')}
-      ${input('alpha','Непрозрачность цвета (0–1)',c.alpha,'number','min="0" max="1" step="0.05"')}
-      ${select('animation','Анимация',c.animation,[['none','Нет'],['torch','Факел'],['pulse','Пульсация'],['flame','Пламя'],['chroma','Цветовая']])}
-      ${input('animationSpeed','Скорость (1–10)',c.animationSpeed,'number','min="1" max="10"')}
-      ${input('animationIntensity','Интенсивность (1–10)',c.animationIntensity,'number','min="1" max="10"')}
-    </div><div class="lk-section">Расход</div><div class="lk-grid">
-      ${select('mode','Тип расхода',c.mode,[['infinite','Без ограничений'],['tank','Бак / заряд'],['disposable','Одноразовый (списать 1 при первом включении)']])}
-      ${input('capacitySeconds','Полное время работы (сек.)',c.capacitySeconds,'number','min="1" max="604800"')}
-      ${input('remainingSeconds','Текущий остаток (сек.)',c.remainingSeconds,'number','min="0" max="604800" step="any"')}
-      ${input('refillItem','Название заправки из инвентаря',c.refillItem)}
-      ${input('refillSeconds','Секунд за 1 заправку',c.refillSeconds,'number','min="1" max="604800"')}
-    </div><div class="lk-section">Зажигание</div><div class="lk-grid">
-      ${select('ignitionMode','Способ включения',c.ignitionMode,[['self','Включается сам'],['require','Требуется предмет (не расходуется)'],['consume','Требуется предмет (расход 1 шт.)']])}
-      ${input('ignitionItem','Точное название предмета розжига',c.ignitionItem)}
-    </div><p class="lk-help">Тип «Бак»: остаток хранится в предмете. «Одноразовый»: 1 штука списывается при первом включении, оставшийся огарок можно повторно зажечь тем же токеном. При паузе и выключении расход останавливается. Настройка начального остатка применима к новым или выключенным источникам.</p></div>`;
-  const result = await DIALOG().prompt({window:{title:`Источник света: ${item.name}`},content,
-    ok:{label:'Сохранить',callback:(_event,button)=>{
-      const f=button.form;
-      const value=name=>f.elements.namedItem(name)?.value;
-      return normalizeConfig({
-        enabled:f.elements.namedItem('enabled')?.checked,
-        mode:value('mode'),capacitySeconds:value('capacitySeconds'),remainingSeconds:value('remainingSeconds'),
-        refillItem:value('refillItem'),refillSeconds:value('refillSeconds'),
-        ignitionMode:value('ignitionMode'),ignitionItem:value('ignitionItem'),
-        bright:value('bright'),dim:value('dim'),angle:value('angle'),color:value('color'),alpha:value('alpha'),
-        animation:value('animation'),animationSpeed:value('animationSpeed'),animationIntensity:value('animationIntensity')
-      });
-    }},rejectClose:false});
-  if (!result) return;
-  await saveConfig(item,result);
-  info(`Параметры «${item.name}» сохранены.`);
+function configureItem(item) { return windows?.openItem(item); }
+function openTokenMenu(token=canvas?.tokens?.controlled?.[0]) { return windows?.open(token); }
+function tokenForActor(actor) {
+  return canvas?.tokens?.controlled?.find(t=>t.actor?.uuid===actor.uuid) ??
+    canvas?.tokens?.placeables?.find(t=>t.actor?.uuid===actor.uuid);
 }
-
-async function openTokenMenu(token = canvas?.tokens?.controlled?.[0]) {
-  if (!token?.document || !token.actor) return warning('Выберите токен персонажа.');
-  if (!canOperate(game.user,token.document)) return warning('Вы не управляете этим персонажем.');
-  const doc=token.document, runtime=activeState(doc), stowed=stowedStates(doc);
-  const items=availableItems(token.actor);
-  let radios = items.map(item => {
-    const c = getConfig(item);
-    const time = c.mode==='infinite'?'∞':displayTime(runtime?.itemId === item.id ? remainingAt(runtime) : c.remainingSeconds);
-    if (stowed.some(s => s.itemId === item.id)) return '';
-    return `<label class="lk-source"><input type="radio" name="itemId" value="${escapeHtml(item.id)}"><span><strong>${escapeHtml(item.name)}</strong><small>×${getQuantity(item)} · ${escapeHtml(c.mode==='tank'?'Остаток: '+time:c.mode==='disposable'?'Одноразовый, '+displayTime(c.capacitySeconds):'Безлимитный')}</small></span></label>`;
-  }).join('');
-  for (const source of stowed) radios += `<label class="lk-source"><input type="radio" name="itemId" value="${escapeHtml(source.itemId)}"><span><strong>${escapeHtml(source.itemName)} (огарок)</strong><small>Осталось ${displayTime(source.remainingSeconds)}</small></span></label>`;
-  if (!radios) radios='<p>В инвентаре пока нет настроенных источников света.</p>';
-  const current=runtime ? `<p><strong>Включено:</strong> ${escapeHtml(runtime.itemName)}<br>Остаток: ${runtime.config.mode==='infinite'?'∞':displayTime(remainingAt(runtime))}</p>` : '<p>Свет выключен.</p>';
-  const content=`<div class="fbl-lk-dialog">${current}<div class="lk-section">Инвентарь</div>${radios}<p class="lk-help">Выберите предмет, затем «Включить» или «Заправить». Настройки предметов редактирует ГМ в карточке предмета.</p></div>`;
-  const result=await DIALOG().wait({window:{title:`Свет · ${token.name}`},content,buttons:[
-    {action:'on',label:'Включить',icon:'fas fa-fire',callback:(_event,button)=>({action:'on',itemId:button.form.querySelector('input[name="itemId"]:checked')?.value})},
-    {action:'off',label:'Выключить',icon:'fas fa-power-off',callback:()=>({action:'off'})},
-    {action:'refill',label:'Заправить',icon:'fas fa-gas-pump',callback:(_event,button)=>({action:'refill',itemId:button.form.querySelector('input[name="itemId"]:checked')?.value})},
-    {action:'close',label:'Закрыть'}
-  ],rejectClose:false});
-  if (!result || typeof result !== 'object') return;
-  if (result.action !== 'off' && !result.itemId) return warning('Выберите предмет.');
-  await requestAction(doc,result.action,result.itemId ?? '');
+async function quickToggle(token=canvas?.tokens?.controlled?.[0],itemId='') {
+  const doc=token?.document ?? token;
+  if(!doc?.actor) return warning('Выберите токен персонажа.');
+  const active=activeState(doc);
+  if(active && (!itemId || active.itemId===itemId)) return requestAction(doc,'off');
+  const last=doc.getFlag(NS,'lastItemId');
+  const sources=availableItems(doc.actor);
+  const chosen=itemId || stowedStates(doc)[0]?.itemId || sources.find(i=>i.id===last)?.id || sources[0]?.id;
+  if(!chosen) return openTokenMenu(token);
+  return requestAction(doc,'switch',chosen);
 }
-
-function installHUD(app, html) {
+function installHUD(app,html) {
   const token=app.object;
-  if (!token?.actor || !canOperate(game.user,token.document)) return;
-  const root=html instanceof HTMLElement?html:(app.element ?? null);
-  const holder=root?.querySelector('.col.right') ?? root?.querySelector('.col.left') ?? root;
-  if (!holder || holder.querySelector('.fbl-lk-token-button')) return;
-  const button=document.createElement('div');
-  button.className='control-icon fbl-lk-token-button';
-  button.title='Источник света · открыть управление';
-  button.innerHTML='<i class="fas fa-lightbulb"></i>';
-  button.addEventListener('click',e=>{e.preventDefault();e.stopPropagation();void openTokenMenu(token);});
+  if(!token?.actor || !canOperate(game.user,token.document)) return;
+  const root=html instanceof HTMLElement?html:(html?.[0] ?? app.element);
+  const holder=root?.querySelector('.col.right') ?? root;
+  if(!holder || holder.querySelector('.fbl-lk-token-button')) return;
+  const button=document.createElement('button');
+  button.type='button'; button.className='control-icon fbl-lk-token-button'+(activeState(token.document)?' lk-on':'');
+  button.title='Lightkeeper · управление светом. Shift + клик — включить / погасить';
+  button.setAttribute('aria-label',button.title); button.innerHTML='<i class="fa-solid fa-lightbulb"></i>';
+  button.addEventListener('click',event=>{event.preventDefault();event.stopPropagation(); if(event.shiftKey) void quickToggle(token); else openTokenMenu(token);});
   holder.append(button);
+}
+function installSheet(app,html) {
+  const actor=app.actor ?? app.document ?? app.object;
+  if(!actor?.items) return;
+  const root=html instanceof HTMLElement?html:(html?.[0] ?? app.element);
+  for(const row of root?.querySelectorAll('[data-item-id]') ?? []) {
+    const item=actor.items.get(row.dataset.itemId);
+    if(!item || !getConfig(item).enabled || row.querySelector('.fbl-lk-sheet-button')) continue;
+    const holder=row.querySelector('.item-edit')?.parentElement ?? row.querySelector('.item-controls') ?? row.querySelector('td:last-child');
+    if(!holder) continue;
+    const button=document.createElement('button'); button.type='button'; button.className='fbl-lk-sheet-button';
+    button.title='Свет: '+item.name+' · Shift + клик — быстрое включение'; button.setAttribute('aria-label',button.title);
+    button.innerHTML='<i class="fa-solid fa-lightbulb"></i>';
+    button.addEventListener('click',event=>{
+      event.preventDefault();event.stopPropagation();
+      const token=tokenForActor(actor);
+      if(!token) return warning('Поместите персонажа на сцену и выберите его токен.');
+      if(event.shiftKey) void quickToggle(token,item.id); else openTokenMenu(token);
+    }); holder.prepend(button);
+  }
 }
 
 async function heartbeatTick() {
@@ -389,14 +446,17 @@ async function heartbeatTick() {
 }
 async function onPause(paused) {
   pauseHistory.push({at:Date.now(),paused});
+  windows?.refresh();
   if (!isAuthority()) return;
   for (const token of sceneTokens()) {
     if (!activeState(token)) continue;
     try { await withLock(token,()=>settle(token)); }
     catch(error) { console.error(`[${NS}] Ошибка переключения паузы`,error); }
   }
+  windows?.refresh();
 }
 async function resumeOnAuthorityChange() {
+  windows?.refresh();
   if (!isAuthority()) return;
   for (const token of sceneTokens()) {
     if (!activeState(token) || locks.has(lockKey(token))) continue;
@@ -404,25 +464,15 @@ async function resumeOnAuthorityChange() {
     try { await withLock(token,()=>settle(token)); }
     catch(error) { console.error(`[${NS}] Ошибка восстановления таймера`,error); }
   }
+  windows?.refresh();
 }
 
 /** Creates only world-item templates. Nothing is added to actors, scenes, or Item Piles automatically. */
 async function createExamples() {
   if (!game.user.isGM) throw new Error('Эту функцию может вызвать только ГМ.');
-  const presets = [
-    ['Огарок свечи', {mode:'disposable',capacitySeconds:600,dim:2,bright:1,angle:360,animation:'torch',ignitionMode:'consume',ignitionItem:'Спички'}],
-    ['Свеча', {mode:'disposable',capacitySeconds:1800,dim:3,bright:1,ignitionMode:'consume',ignitionItem:'Спички'}],
-    ['Масляная лампа', {mode:'tank',capacitySeconds:2400,dim:5,bright:3,refillItem:'Ламповое масло',refillSeconds:1200,ignitionMode:'consume',ignitionItem:'Спички'}],
-    ['Фонарь со шторками', {mode:'tank',capacitySeconds:2400,dim:6,bright:4,refillItem:'Ламповое масло',refillSeconds:1200,ignitionMode:'consume',ignitionItem:'Спички'}],
-    ['Карманный фонарик', {mode:'tank',capacitySeconds:900,dim:6,bright:3,angle:75,color:'#e8f0ff',animation:'none',refillItem:'Батарейка',refillSeconds:900}],
-    ['Мощный фонарик', {mode:'tank',capacitySeconds:600,dim:10,bright:6,angle:50,color:'#f2f6ff',animation:'none',refillItem:'Батарейка',refillSeconds:600}],
-  ];
-  const data = presets.map(([name,c])=>({name,type:'gear',system:{quantity:1},flags:{[NS]:{light:normalizeConfig({enabled:true,...c})}}}));
-  data.push(
-    {name:'Спички',type:'gear',system:{quantity:8}},
-    {name:'Ламповое масло',type:'gear',system:{quantity:3}},
-    {name:'Батарейка',type:'gear',system:{quantity:2}}
-  );
+  const library=catalog();
+  const data=library.sources.map(preset=>({name:preset.names[0] ?? preset.label,type:'gear',system:{quantity:1},flags:{[NS]:{light:normalizeConfig({...preset.config,remainingSeconds:preset.config.capacitySeconds})}}}));
+  for(const resource of library.resources) data.push({name:resource.names[0] ?? resource.label,type:'gear',system:{quantity:resource.id==='matches'?8:3}});
   const created = await Item.createDocuments(data);
   info(`Создано ${created.length} примеров в справочнике предметов. Их можно перетаскивать в Item Piles.`);
   return created;
@@ -431,6 +481,17 @@ async function createExamples() {
 Hooks.once('init',()=>{
   game.settings.register(NS,'expiryChat',{name:'Оповещать о погасших источниках',hint:'Сообщение в чат при автоматическом окончании топлива.',scope:'world',config:true,type:Boolean,default:true});
   game.settings.register(NS,'allowPlayers',{name:'Разрешить игрокам управлять своим светом',scope:'world',config:true,type:Boolean,default:true});
+  game.settings.register(NS,'autoRecognize',{name:'Распознавать источники по библиотеке',hint:'Предмет без своих настроек использует первый совпавший шаблон. При первом зажигании настройки закрепляются в предмете.',scope:'world',config:true,type:Boolean,default:true,onChange:()=>windows?.refresh()});
+  game.settings.register(NS,'lowFuelNotify',{name:'Предупреждать о малом запасе',hint:'Одно сообщение владельцам и ГМу при достижении порога источника. Скрытые токены видят только ГМы.',scope:'world',config:true,type:Boolean,default:true});
+  game.settings.register(NS,'catalog',{scope:'world',config:false,type:Object,default:defaultCatalog(),onChange:()=>windows?.refresh()});
+  windows=createInterface({catalog,identify,viewModel,active:activeView,resolveToken,action:requestAction,isGM:()=>game.user.isGM,info,warning,
+    async saveItem(item,config) { await saveConfig(item,config); windows.refresh(); info(`Настройки «${item.name}» сохранены.`); },
+    async saveCatalog(value) {
+      if(!game.user.isGM) throw new Error('Библиотеку настраивает ГМ.');
+      await game.settings.set(NS,'catalog',normalizeCatalog(value)); windows.refresh();
+    }});
+  game.settings.registerMenu(NS,'templates',{name:'Библиотека источников света',label:'Открыть мастерскую',hint:'Шаблоны, распознаваемые названия, розжиг и топливо.',icon:'fa-solid fa-lightbulb',type:windows.Menu,restricted:true});
+  game.keybindings.register(NS,'quickToggle',{name:'Быстро включить / погасить свет',hint:'Выбранный токен использует последний источник или сохранённый огарок.',editable:[{key:'KeyL',modifiers:['SHIFT']}],onDown:()=>{void quickToggle();return true;}});
   Hooks.on('getSceneControlButtons',controls=>{
     if (!controls.tokens?.tools) return;
     controls.tokens.tools['fbl-lightkeeper']={name:'fbl-lightkeeper',title:'Управление светом выбранного токена',icon:'fas fa-lightbulb',order:Object.keys(controls.tokens.tools).length,button:true,visible:true,onChange:()=>void openTokenMenu()};
@@ -443,7 +504,16 @@ Hooks.once('init',()=>{
     if (!game.user?.isGM) return;
     buttons.unshift({class:'fbl-lightkeeper',label:'Свет',icon:'fas fa-lightbulb',onclick:()=>configureItem(app.object ?? app.item)});
   });
+  Hooks.on('getActorSheetHeaderButtons',(app,buttons)=>{
+    buttons.unshift({class:'fbl-lightkeeper',label:'Свет',icon:'fa-solid fa-lightbulb',onclick:()=>{
+      const token=tokenForActor(app.actor ?? app.object);
+      return token?openTokenMenu(token):warning('Поместите персонажа на сцену и выберите его токен.');
+    }});
+  });
   Hooks.on('renderTokenHUD',installHUD);
+  Hooks.on('renderActorSheet',installSheet);
+  Hooks.on('controlToken',(token,controlled)=>{if(controlled) windows.follow(token);});
+  for(const hook of ['updateToken','deleteToken','updateItem','createItem','deleteItem','updateActor']) Hooks.on(hook,()=>windows.refresh());
   Hooks.on('pauseGame',onPause);
   Hooks.on('updateUser',onUserUpdate);
   Hooks.on('preCreateToken',token=>{
@@ -458,13 +528,22 @@ Hooks.once('ready',async()=>{
   if (game.system.id !== 'forbidden-lands') console.warn(`[${NS}] Модуль предназначен для Forbidden Lands; система: ${game.system.id}`);
   pauseHistory = [{at:Date.now(),paused:game.paused}];
   // A small public API for macros and other modules.
-  game.modules.get(NS).api={open:openTokenMenu,configure:configureItem,requestAction,createExamples};
+  game.modules.get(NS).api={open:openTokenMenu,configure:configureItem,requestAction,createExamples,quickToggle,
+    library:id=>windows.openLibrary(id),getCatalog:catalog,
+    async applyPreset(item,id) {
+      if(!game.user.isGM) throw new Error('Шаблон применяет ГМ.');
+      const preset=catalog().sources.find(s=>s.id===id); if(!preset) throw new Error('Шаблон не найден.');
+      await saveConfig(item,{...preset.config,remainingSeconds:preset.config.capacitySeconds}); windows.refresh();
+    }};
   heartbeat=setInterval(heartbeatTick,5000);
+  clockTicker=setInterval(()=>windows.clock(),1000);
   await resumeOnAuthorityChange();
   Hooks.on('userConnected',resumeOnAuthorityChange);
 });
 Hooks.once('shutdown',()=>{
   if(heartbeat)clearInterval(heartbeat);
+  if(clockTicker)clearInterval(clockTicker);
+  void windows?.close();
   for (const wait of pending.values()) {
     clearTimeout(wait.timeout); wait.reject(new Error('Соединение с миром закрыто.'));
   }

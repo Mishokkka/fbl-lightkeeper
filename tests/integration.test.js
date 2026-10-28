@@ -76,7 +76,7 @@ beforeEach(async () => {
   console.error = () => {};
   globalThis.Hooks = {once:register,on:register};
   globalThis.foundry = {utils:{deepClone:clone,randomID:() => `request-${++serial}`},
-    applications:{api:{DialogV2:{}}}};
+    applications:{api:{ApplicationV2:class {}}}};
   env.gm = makeUser('GM1',true);
   env.player = makeUser('P1',false);
   env.users = collection([env.gm,env.player]);
@@ -88,7 +88,8 @@ beforeEach(async () => {
   env.api = {};
   globalThis.game = {user:env.gm,users:env.users,system:{id:'forbidden-lands'},paused:false,
     modules:{get:() => env.api},scenes:collection([env.scene]),
-    settings:{register:(ns,key,c) => settings.set(`${ns}.${key}`,c.default),get:(ns,key) => settings.get(`${ns}.${key}`)},
+    settings:{register:(ns,key,c) => settings.set(`${ns}.${key}`,c.default),get:(ns,key) => settings.get(`${ns}.${key}`),
+      registerMenu:()=>{},set:async(ns,key,value)=>settings.set(`${ns}.${key}`,value)},keybindings:{register:()=>{}},
     socket:{on:() => assert.fail('Unauthenticated module socket must not be used'),emit:() => assert.fail('Unexpected socket')}};
   globalThis.ui = {notifications:{info:m => env.notices.push(m),warn:m => env.notices.push(m)}};
   globalThis.ChatMessage = {create:async data => env.chat.push(data)};
@@ -384,4 +385,98 @@ test('non-authority caller waits for a correlated result from the selected GM',a
   assert.equal(env.notices.length,0);
   await env.fire('updateUser',env.player,{flags:{[NS]:{result:{id:request.id}}}},{},'GM1');
   assert.equal(await action,'Зажжён');
+});
+
+test('an unconfigured candle uses a template and pins its settings on first ignition',async()=>{
+  const candle=makeItem(env.actor,'AUTO',{},2,'Свеча'); candle.flags={};
+  const matches=makeItem(env.actor,'MATCH',{enabled:false},2,'Matches');
+  await env.action('on','AUTO');
+  assert.equal(env.active().config.capacitySeconds,1800);
+  assert.equal(candle.system.quantity,1); assert.equal(matches.system.quantity,1);
+  assert.equal(candle.getFlag(NS,'light').templateId,'candle');
+  const catalog=env.api.api.getCatalog(); catalog.sources[0].config.capacitySeconds=9999;
+  env.settings.set(`${NS}.catalog`,catalog);
+  assert.equal(env.active().config.capacitySeconds,1800);
+});
+
+test('resource aliases work for refills and disabled manual configuration blocks recognition',async()=>{
+  env.lamp.flags[NS].light.refillResource='oil'; env.oil.name='Lamp Oil';
+  env.lamp.flags[NS].light.remainingSeconds=20;
+  await env.action('refill'); assert.equal(env.remaining(),60);
+  const candle=makeItem(env.actor,'DISABLED',{enabled:false},1,'Свеча');
+  await env.action('on','DISABLED'); assert.equal(env.active(),undefined);
+  assert.equal(candle.system.quantity,1);
+});
+
+test('shutters hide light while fuel keeps burning and restore the source on opening',async()=>{
+  env.lamp.flags[NS].light.shutter=true;
+  await env.action('on'); env.now+=10000; await env.action('shutter');
+  assert.equal(env.token.currentLight.bright,0); assert.equal(env.active().shutterClosed,true);
+  env.now+=5000; await env.tick(); assert.equal(env.remaining(),85);
+  await env.action('shutter'); assert.equal(env.token.currentLight.bright,4);
+  assert.equal(env.active().shutterClosed,false);
+  await env.action('off'); assert.equal(env.token.currentLight.bright,0);
+});
+
+test('switching prevalidates the next source before extinguishing the current one',async()=>{
+  await env.action('on');
+  makeItem(env.actor,'NEW',{mode:'disposable',ignitionMode:'consume',ignitionItem:'Missing'});
+  assert.equal(await env.action('switch','NEW'),null);
+  assert.equal(env.active().itemId,'LAMP');
+  makeItem(env.actor,'CANDLE',{mode:'disposable'});
+  env.now+=2000; await env.action('switch','CANDLE');
+  assert.equal(env.active().itemId,'CANDLE'); assert.equal(env.remaining(),98);
+});
+
+test('quick toggle reuses the last source and preserves a candle stub',async()=>{
+  makeItem(env.actor,'CANDLE',{mode:'disposable'});
+  await env.api.api.quickToggle(env.token,'CANDLE'); env.now+=3000;
+  await env.api.api.quickToggle(env.token); assert.equal(env.active(),null);
+  await env.api.api.quickToggle(env.token);
+  assert.equal(env.active().itemId,'CANDLE'); assert.equal(env.active().remainingSeconds,97);
+});
+
+test('low-fuel warning is private, once per threshold crossing and rearmed by refill',async()=>{
+  env.lamp.flags[NS].light.lowFuelSeconds=60;
+  await env.action('on'); env.now+=45000; await env.tick(); await env.tick();
+  assert.equal(env.chat.length,1); assert.deepEqual(env.chat[0].whisper,['GM1','P1']);
+  await env.action('refill'); assert.equal(env.active().lowFuelWarned,false);
+  env.now+=40000; await env.tick(); assert.equal(env.chat.length,2);
+});
+
+test('low-fuel notification can be disabled globally',async()=>{
+  env.settings.set(`${NS}.lowFuelNotify`,false);
+  await env.action('on'); env.now+=45000; await env.tick(); assert.equal(env.chat.length,0);
+});
+
+test('GM time adjustment changes the active tank without consuming fuel stock',async()=>{
+  env.lamp.flags[NS].light.capacitySeconds=1000;
+  await env.action('on');
+  await env.api.api.requestAction(env.token,'adjust','',{deltaSeconds:300});
+  assert.equal(env.active().remainingSeconds,400); assert.equal(env.remaining(),400);
+  assert.equal(env.oil.system.quantity,2);
+  await env.api.api.requestAction(env.token,'adjust','',{deltaSeconds:-500});
+  assert.equal(env.active(),null); assert.equal(env.remaining(),0);
+});
+
+test('players cannot accidentally use GM time adjustment',async()=>{
+  await env.action('on');
+  apply(env.player,{[`flags.${NS}.request`]:{id:'adjust',action:'adjust',deltaSeconds:300,sceneId:'S1',tokenId:'T1'}});
+  await env.fire('updateUser',env.player,{flags:{[NS]:{request:{id:'adjust'}}}},{},'P1');
+  assert.match(env.player.getFlag(NS,'result').error,/корректирует ГМ/);
+  assert.equal(env.active().remainingSeconds,100);
+});
+
+test('hidden low-fuel warning remains visible only to GMs',async()=>{
+  env.token.hidden=true;
+  await env.action('on'); env.now+=45000; await env.tick();
+  assert.deepEqual(env.chat[0].whisper,['GM1']);
+});
+
+test('new example items use current world templates and their shutters',async()=>{
+  const data=await env.api.api.createExamples();
+  const hooded=data.find(i=>i.name==='Фонарь со шторками');
+  assert.ok(hooded.flags[NS].light.shutter);
+  assert.equal(hooded.flags[NS].light.refillResource,'oil');
+  assert.ok(data.some(i=>i.name==='Спички'));
 });
