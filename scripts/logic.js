@@ -7,11 +7,12 @@ const limit = (value, min, max, fallback) => {
   return Number.isFinite(n) ? Math.max(min, Math.min(max, n)) : fallback;
 };
 export function normalizeConfig(raw = {}) {
+  raw = raw && typeof raw === 'object' ? raw : {};
   const mode = MODES.includes(raw.mode) ? raw.mode : 'tank';
   const ignitionMode = IGNITION.includes(raw.ignitionMode) ? raw.ignitionMode : 'self';
   const capacitySeconds = Math.round(limit(raw.capacitySeconds, 1, 604800, 1800));
   const remaining = raw.remainingSeconds === null || raw.remainingSeconds === undefined
-    ? capacitySeconds : Math.round(limit(raw.remainingSeconds, 0, 604800, capacitySeconds));
+    ? capacitySeconds : limit(raw.remainingSeconds, 0, 604800, capacitySeconds);
   return {
     enabled: !!raw.enabled,
     mode,
@@ -26,17 +27,19 @@ export function normalizeConfig(raw = {}) {
     angle: limit(raw.angle, 1, 360, 360),
     color: /^#[0-9a-fA-F]{6}$/.test(String(raw.color)) ? String(raw.color) : '#ffba70',
     alpha: limit(raw.alpha, 0, 1, 0.45),
-    animation: ['none', 'torch', 'pulse', 'chroma', 'flickering'].includes(raw.animation) ? raw.animation : 'torch',
-    animationSpeed: limit(raw.animationSpeed, 1, 10, 3),
-    animationIntensity: limit(raw.animationIntensity, 1, 10, 3)
+    animation: raw.animation === 'flickering' ? 'flame' :
+      (['none', 'torch', 'pulse', 'chroma', 'flame'].includes(raw.animation) ? raw.animation : 'torch'),
+    animationSpeed: Math.round(limit(raw.animationSpeed, 1, 10, 3)),
+    animationIntensity: Math.round(limit(raw.animationIntensity, 1, 10, 3))
   };
 }
 export function lightData(config) {
   const c = normalizeConfig(config);
   return {
-    bright: Math.min(c.bright, c.dim), dim: Math.max(c.bright, c.dim),
+    negative: false, luminosity: 0.5, darkness: {min:0,max:1},
+    bright: c.bright, dim: Math.max(c.bright, c.dim),
     angle: c.angle, color: c.color, alpha: c.alpha,
-    animation: { type: c.animation, speed: c.animationSpeed, intensity: c.animationIntensity }
+    animation: { type: c.animation === 'none' ? null : c.animation, speed: c.animationSpeed, intensity: c.animationIntensity }
   };
 }
 export function tickRemaining(remainingSeconds, lastAt, now, paused) {
@@ -59,7 +62,7 @@ export function getQuantity(item) {
 export function findNamedItem(actor, name, exceptId = '') {
   if (!name?.trim()) return null;
   return actor.items.find(i => i.id !== exceptId &&
-    i.name.trim().toLocaleLowerCase() === name.trim().toLocaleLowerCase() && getQuantity(i) > 0) ?? null;
+    String(i.name ?? '').trim().toLocaleLowerCase() === name.trim().toLocaleLowerCase() && getQuantity(i) >= 1) ?? null;
 }
 export function makeRuntime(item, config, previousLight, now, remainder = null) {
   const c = normalizeConfig(config);

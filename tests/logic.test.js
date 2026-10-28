@@ -4,7 +4,26 @@ import {normalizeConfig, lightData, tickRemaining, getQuantity, findNamedItem, d
 test('normalization clamps and handles invalid fields', () => {
   const c = normalizeConfig({enabled:true, mode:'tank', capacitySeconds:30, remainingSeconds:99, dim:-7, bright:30, angle:400});
   assert.equal(c.remainingSeconds, 30); assert.equal(c.dim, 0); assert.equal(c.angle, 360);
-  assert.equal(lightData(c).bright, 0); assert.equal(lightData(c).dim, 30);
+  assert.equal(lightData(c).bright, 30); assert.equal(lightData(c).dim, 30);
+});
+
+test('fractional fuel survives normalization and repeated switches', () => {
+  assert.equal(normalizeConfig({capacitySeconds:100,remainingSeconds:99.125}).remainingSeconds,99.125);
+  assert.equal(normalizeConfig(null).capacitySeconds,1800);
+});
+
+test('animation names match Foundry v13 and migrate old flickering settings', () => {
+  assert.equal(lightData({animation:'none'}).animation.type,null);
+  assert.equal(lightData({animation:'flickering'}).animation.type,'flame');
+  assert.equal(lightData({animationSpeed:2.7,animationIntensity:4.1}).animation.speed,3);
+  assert.equal(lightData({animationSpeed:2.7,animationIntensity:4.1}).animation.intensity,4);
+});
+
+test('ignition and refill need a whole unit, skipping fractional and malformed stacks', () => {
+  const items=[{id:'a',name:'Масло',system:{quantity:0.5}},
+    {id:'b',name:null,system:{quantity:2}},{id:'c',name:'МАСЛО',system:{quantity:1}}];
+  assert.equal(findNamedItem({items},' масло ').id,'c');
+  assert.equal(findNamedItem({items},'масло','c'),null);
 });
 test('a paused light does not consume time', () => {
   assert.equal(tickRemaining(120,1000,31000,true),120);
