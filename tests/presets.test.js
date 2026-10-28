@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {defaultCatalog,normalizeCatalog,identifySource,matchesItem,findResource,nameKey} from '../scripts/presets.js';
+import {defaultCatalog,normalizeCatalog,identifySource,matchesItem,findResource,nameKey,PresetIndex} from '../scripts/presets.js';
 
 const item=(name,extra={})=>({id:'X',name,type:'gear',system:{quantity:1},getFlag:()=>undefined,...extra});
 test('default candle is recognized across case, whitespace and unicode variants',()=>{
@@ -8,6 +8,19 @@ test('default candle is recognized across case, whitespace and unicode variants'
   assert.equal(result.origin,'recognized'); assert.equal(result.config.mode,'disposable');
   assert.equal(result.config.ignitionResource,'matches');
   assert.equal(nameKey('  Зелёный   ФОНАРЬ '),'зеленый фонарь');
+});
+
+test('compiled recognition agrees with rules and invalidates renamed or retyped items',()=>{
+  const catalog=defaultCatalog(), index=new PresetIndex(catalog), doc=item('Свеча');
+  assert.equal(index.identify(doc).preset.id,'candle');
+  doc.name='Масляная лампа';assert.equal(index.identify(doc).preset.id,'oil-lamp');
+  doc.name='Нет шаблона';assert.equal(index.identify(doc).origin,'none');
+  doc._stats={duplicateSource:'Item.original'};
+  const strict=new PresetIndex({sources:[{id:'strict',uuids:['Item.original'],itemTypes:['gear'],config:{}}]});
+  assert.equal(strict.identify(doc).preset.id,'strict');doc.type='spell';assert.equal(strict.identify(doc).origin,'none');
+  const fuel=item('Matches');assert.equal(index.findResource({items:[fuel]},'matches',''),fuel);
+  fuel.system.quantity=0;assert.equal(index.findResource({items:[fuel]},'matches',''),null);
+  fuel.name='Спички';fuel.system.quantity=1;assert.equal(index.findResource({items:[fuel]},'matches',''),fuel);
 });
 test('exact recognition does not consume unrelated named inventory',()=>{
   assert.equal(identifySource(item('Подсвечник для свечи'),defaultCatalog()).origin,'none');

@@ -23,3 +23,19 @@ test('form values use minutes but preserve fractional fuel and resource referenc
   assert.equal(config.remainingSeconds,862.5);assert.equal(config.capacitySeconds,2400);
   assert.equal(config.refillResource,'oil');assert.equal(config.lowFuelSeconds,120);assert.ok(config.shutter);
 });
+
+test('cleared numeric fields preserve the existing value instead of creating an empty one-second source',()=>{
+  const base=normalizeConfig({capacitySeconds:2400,remainingSeconds:862.5,refillSeconds:1200,lowFuelSeconds:120,bright:4,dim:6});
+  const form={elements:{namedItem:name=>({value:name==='enabled'?'true':'',checked:name==='enabled'})}};
+  const result=readConfig(form,base,{item:true});
+  for(const name of ['capacitySeconds','remainingSeconds','refillSeconds','lowFuelSeconds','bright','dim']) assert.equal(result[name],base[name]);
+  assert.equal(readConfig(form,base).remainingSeconds,2400);
+});
+
+test('explicit zero still empties fuel or disables a threshold and a missing field falls back',()=>{
+  const base=normalizeConfig({capacitySeconds:2400,remainingSeconds:500,lowFuelSeconds:120});
+  const values={remainingMinutes:'0',lowFuelMinutes:'0'};
+  const form={elements:{namedItem:name=>name in values?{value:values[name]}:null}};
+  const config=readConfig(form,base,{item:true});
+  assert.equal(config.remainingSeconds,0);assert.equal(config.lowFuelSeconds,0);assert.equal(config.capacitySeconds,2400);
+});

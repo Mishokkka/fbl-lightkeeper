@@ -2,10 +2,12 @@
 export const MODULE_ID = 'fbl-lightkeeper';
 export const MODES = Object.freeze(['infinite', 'tank', 'disposable']);
 export const IGNITION = Object.freeze(['self', 'require', 'consume']);
+/** Coerce a finite numeric value and clamp it to a supported range. */
 const limit = (value, min, max, fallback) => {
   const n = Number(value);
   return Number.isFinite(n) ? Math.max(min, Math.min(max, n)) : fallback;
 };
+/** Normalize stored source settings; durations are seconds and remaining fuel keeps fractions. */
 export function normalizeConfig(raw = {}) {
   raw = raw && typeof raw === 'object' ? raw : {};
   const mode = MODES.includes(raw.mode) ? raw.mode : 'tank';
@@ -38,6 +40,7 @@ export function normalizeConfig(raw = {}) {
     animationIntensity: Math.round(limit(raw.animationIntensity, 1, 10, 3))
   };
 }
+/** Build v13 emission fields without inheriting darkness mode from the original token. */
 export function lightData(config) {
   const c = normalizeConfig(config);
   return {
@@ -47,12 +50,14 @@ export function lightData(config) {
     animation: { type: c.animation === 'none' ? null : c.animation, speed: c.animationSpeed, intensity: c.animationIntensity }
   };
 }
+/** Subtract only forward unpaused wall time and never allow negative fuel. */
 export function tickRemaining(remainingSeconds, lastAt, now, paused) {
   const current = Math.max(0, Number(remainingSeconds) || 0);
   if (paused || !Number.isFinite(lastAt) || lastAt <= 0 || now <= lastAt) return current;
   const delta = (now - lastAt) / 1000;
   return Math.max(0, current - delta);
 }
+/** Format remaining seconds for UI text; non-finite values represent unlimited light. */
 export function displayTime(seconds) {
   if (!Number.isFinite(seconds)) return '∞';
   const s = Math.ceil(Math.max(0, seconds));
@@ -60,15 +65,18 @@ export function displayTime(seconds) {
   const h = Math.floor(m / 60);
   return h ? `${h} ч ${String(m % 60).padStart(2, '0')} м` : `${m} м ${String(s % 60).padStart(2, '0')} с`;
 }
+/** Read supported numerical stock, treating missing or invalid quantities as empty. */
 export function getQuantity(item) {
   const n = Number(item?.system?.quantity);
   return Number.isFinite(n) && n >= 0 ? n : 0;
 }
+/** Legacy exact-name lookup requiring at least one whole resource unit. */
 export function findNamedItem(actor, name, exceptId = '') {
   if (!name?.trim()) return null;
   return actor.items.find(i => i.id !== exceptId &&
     String(i.name ?? '').trim().toLocaleLowerCase() === name.trim().toLocaleLowerCase() && getQuantity(i) >= 1) ?? null;
 }
+/** Create a serializable runtime snapshot with a stable previous-light backup. */
 export function makeRuntime(item, config, previousLight, now, remainder = null) {
   const c = normalizeConfig(config);
   return {

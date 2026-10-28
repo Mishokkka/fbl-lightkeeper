@@ -23,4 +23,5 @@ jobs:
       - run: node --check scripts/presets.js
       - run: node --check scripts/views.js
       - run: node --check scripts/interface.js
+      - run: node --check scripts/runtime.js
       - run: npm test

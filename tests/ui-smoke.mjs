@@ -71,8 +71,28 @@ try {
   await editor.screenshot({path:path.join(output,'lightkeeper-item-editor.png')});
   await editor.getByRole('button',{name:'Сохранить предмет',exact:true}).click();
   await page.waitForFunction(()=>demo.actor.items.get('FLASH').getFlag('fbl-lightkeeper','light')?.shutter===true);
+  // CodeRabbit regression: optional blank numeric fields must preserve their prior values.
+  await editor.waitFor({state:'hidden'});
+  await panel.locator('.lk-source-row').filter({has:page.getByRole('heading',{name:'Карманный фонарик',exact:true})}).getByRole('button',{name:'Настроить',exact:true}).click();
+  for(const name of ['capacityMinutes','remainingMinutes','refillMinutes','lowFuelMinutes']) await editor.locator(`[name="${name}"]`).fill('');
+  await editor.getByRole('button',{name:'Сохранить предмет',exact:true}).click();await editor.waitFor({state:'hidden'});
+  assert.equal(await page.evaluate(()=>demo.actor.items.get('FLASH').getFlag('fbl-lightkeeper','light').capacitySeconds),2400);
+  assert.equal(await page.evaluate(()=>demo.actor.items.get('FLASH').getFlag('fbl-lightkeeper','light').remainingSeconds),2400);
+  // CodeRabbit regression: import into an empty section selects a form and saves successfully.
+  await library.getByRole('button',{name:'Розжиг и топливо',exact:true}).click();
+  let count=await library.locator('.lk-template-choice').count();
+  while(count) {
+    await library.getByRole('button',{name:'Удалить',exact:true}).click();
+    await page.waitForFunction(expected=>document.querySelectorAll('#fbl-lightkeeper-library .lk-template-choice').length===expected,--count);
+  }
+  await library.getByRole('button',{name:'Сохранить библиотеку',exact:true}).click();
+  await page.waitForFunction(()=>demo.api.getCatalog().resources.length===0);
+  await library.locator('[data-lk-import]').setInputFiles({name:'resource.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify({version:1,sources:[],resources:[{id:'new-stock',label:'Новый запас',names:['Новый запас']}]}))});
+  await library.getByRole('heading',{name:'Новый запас',exact:true}).waitFor();
+  await library.getByRole('button',{name:'Сохранить библиотеку',exact:true}).click();
+  await page.waitForFunction(()=>demo.api.getCatalog().resources[0]?.id==='new-stock');
   assert.deepEqual(errors,[]);
-  console.log('Browser checks passed: panel, shutters, pause, switching, templates, resources, theme isolation, JSON import/export, item editor.');
+  console.log('Browser checks passed: panel, shutters, pause, switching, templates, resources, theme isolation, JSON import/export, item editor, empty-field and empty-import regressions.');
   console.log('Screenshots: '+output);
 } catch(error) {
   const page=browser.contexts()[0]?.pages()[0];

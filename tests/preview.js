@@ -1,5 +1,6 @@
 // Local visual harness: actual module and windows, simulated Foundry documents.
 const clone=value=>structuredClone(value);
+/** Merge inherited application defaults and nested document fields for the visual adapter. */
 function merge(target,source) {
   for(const [key,value] of Object.entries(source)) {
     if(value && typeof value==='object' && !Array.isArray(value)) merge(target[key]??={},value);
@@ -7,6 +8,7 @@ function merge(target,source) {
   }
   return target;
 }
+/** Support the same dotted deltas as the production checkpoint path. */
 function apply(target,changes) {
   for(const [path,value] of Object.entries(changes)) {
     const keys=path.split('.'); let node=target;
@@ -17,17 +19,20 @@ function apply(target,changes) {
 const listeners=new Map();
 const register=(name,fn)=>listeners.set(name,[...(listeners.get(name)??[]),fn]);
 async function fire(name,...args) { for(const fn of listeners.get(name)??[]) await fn(...args); }
+/** Expose minimal collection helpers required by the real module controller. */
 function collection(values=[]) { values.get=id=>values.find(v=>v.id===id); Object.defineProperty(values,'contents',{get:()=>[...values]}); return values; }
 function getFlag(ns,key) { return key.split('.').reduce((o,k)=>o?.[k],this.flags?.[ns]); }
 let top=10;
 class PreviewApp {
   static DEFAULT_OPTIONS={classes:[],window:{frame:true},position:{width:500,height:760}};
+  /** Combine inherited window defaults; this substitutes only the Foundry window frame. */
   constructor(options={}) {
     this.options={};
     const chain=[]; for(let cls=this.constructor;cls && cls!==Function.prototype;cls=Object.getPrototypeOf(cls)) if(Object.hasOwn(cls,'DEFAULT_OPTIONS')) chain.unshift(cls.DEFAULT_OPTIONS);
     for(const defaults of [...chain,options]) merge(this.options,defaults);
     this.rendered=false;
   }
+  /** Mount a test frame and use the real module HTML renderers inside it. */
   async render() {
     if(!this.element) {
       this.element=document.createElement('section'); this.element.id=this.options.id ?? crypto.randomUUID();
@@ -56,6 +61,7 @@ globalThis.foundry={applications:{api:{ApplicationV2:PreviewApp}},utils:{deepClo
 const settings=new Map(); const settingsConfig=new Map();
 const gm={id:'GM',isGM:true,active:true,flags:{},getFlag};
 const actor={id:'A1',uuid:'Actor.A1',name:'Элиас Блэквуд',items:collection(),testUserPermission:()=>true};
+/** Create a preview-only embedded Item and emit real module hook callbacks on changes. */
 function item(id,name,quantity=1) {
   const doc={id,uuid:'Actor.A1.Item.'+id,parent:actor,type:'gear',documentName:'Item',name,system:{quantity},flags:{},getFlag,
     async update(changes) { apply(this,changes); await fire('updateItem',this,changes); return this; },

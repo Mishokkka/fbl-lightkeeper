@@ -1,6 +1,7 @@
 import { MODULE_ID as NS, normalizeConfig, lightData, tickRemaining, displayTime, getQuantity, makeRuntime } from './logic.js';
-import {defaultCatalog,normalizeCatalog,identifySource,findResource} from './presets.js';
+import {defaultCatalog,normalizeCatalog,PresetIndex} from './presets.js';
 import {createInterface} from './interface.js';
+import {ActiveSourceIndex,changedPaths,isClockUpdate} from './runtime.js';
 
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[char]));
 const warning = message => ui.notifications.warn(`[Lightkeeper] ${message}`);
@@ -14,13 +15,21 @@ let authorityId = null;
 let authoritySince = 0;
 let pauseHistory = [];
 let windows = null;
-let clockTicker = null;
-const catalog = () => normalizeCatalog(game.settings.get(NS,'catalog') ?? defaultCatalog());
-const identify = item => identifySource(item,catalog(),game.settings.get(NS,'autoRecognize') !== false);
+let presetIndex = null;
+let ready = false;
+let ticking = false;
+const activeSources=new ActiveSourceIndex(actorKey);
+/** Settings hooks invalidate the compiled library on every client. UI/API callers get a copy. */
+const presets = () => presetIndex ??= new PresetIndex(game.settings.get(NS,'catalog') ?? defaultCatalog());
+const catalog = () => clone(presets().catalog);
+const identify = item => presets().identify(item,game.settings.get(NS,'autoRecognize') !== false);
+const resourceFor = (actor,key,name,exceptId='') => presets().findResource(actor,key,name,exceptId);
 
+/** Choose the same connected GM on every client, independent of user-list order. */
 function leadGM() {
   return game.users.filter(u => u.isGM && u.active).sort((a,b) => a.id.localeCompare(b.id))[0] ?? null;
 }
+/** Record a new authority epoch; elapsed time before this client took over is excluded. */
 function isAuthority() {
   const next = leadGM()?.id ?? null;
   if (next !== authorityId) {
@@ -32,6 +41,7 @@ function isAuthority() {
 function getConfig(item) { return item ? identify(item).config : normalizeConfig(); }
 // getFlag returns live document data. Never mutate it before update succeeds.
 function activeState(token) { return clone(token.getFlag(NS, 'active') ?? null); }
+/** Read disposable remainders without mutating flags; merge the legacy single-stub format. */
 function stowedStates(token) {
   const saved = clone(token.getFlag(NS, 'stowedSources') ?? []);
   const legacy = token.getFlag(NS, 'stowed');
@@ -39,14 +49,16 @@ function stowedStates(token) {
   return saved.filter(s => s.remainingSeconds > 0);
 }
 function availableItems(actor) { return actor?.items.filter(i => getConfig(i).enabled && getQuantity(i) > 0) ?? []; }
+/** Respect ownership and the world player-control switch for ordinary game actions. */
 function canOperate(user, token) { return !!(user?.active && token?.actor && (user.isGM || (game.settings.get(NS,'allowPlayers') && token.actor.testUserPermission(user, 'OWNER')))); }
 function resolveToken(sceneId, tokenId) { return game.scenes.get(sceneId)?.tokens.get(tokenId) ?? null; }
-function sceneTokens() { return game.scenes.contents.flatMap(s => s.tokens.contents); }
+/** Distinguish a shared linked inventory from each synthetic unlinked inventory. */
 function actorKey(token) {
   return token.actor?.uuid ?? (token.actorLink === false
     ? `Scene.${token.parent.id}.Token.${token.id}.Actor.${token.actor?.id}` : `Actor.${token.actor?.id}`);
 }
 function lockKey(token) { return actorKey(token); }
+/** Serialize changes to one inventory while allowing unrelated actors to proceed concurrently. */
 async function withLock(token, callback) {
   const key = lockKey(token);
   const previous = locks.get(key) ?? Promise.resolve();
@@ -55,8 +67,7 @@ async function withLock(token, callback) {
   try { return await task; } finally { if (locks.get(key) === task) locks.delete(key); }
 }
 function runningTank(token, itemId) {
-  return sceneTokens().find(t => actorKey(t) === actorKey(token) &&
-    activeState(t)?.config.mode === 'tank' && activeState(t)?.itemId === itemId);
+  return activeSources.findTank(token,itemId);
 }
 /** Integrate pause boundaries even if document writes are still queued. */
 function remainingAt(runtime, now = Date.now()) {
@@ -72,11 +83,13 @@ function remainingAt(runtime, now = Date.now()) {
   }
   return tickRemaining(remaining, from, now, paused);
 }
+/** Apply a stock delta and treat a cancelled document update as a failed action. */
 async function updateQuantity(item, change) {
   const current = getQuantity(item);
   if (current + change < 0) throw new Error(`Недостаточно предметов: «${item.name}».`);
   if (!await item.update({'system.quantity': current + change})) throw new Error(`Изменение количества «${item.name}» отменено.`);
 }
+/** Snapshot all existing light fields so extinguishing restores the original token. */
 function previousLight(token) {
   return token.light?.toObject?.() ?? foundry.utils.deepClone(token.toObject().light ?? {});
 }
@@ -85,15 +98,21 @@ function isDisposable(runtime) { return runtime?.config?.mode === 'disposable'; 
 async function saveConfig(item, config) {
   if (!await item.setFlag(NS,'light',config)) throw new Error(`Сохранение «${item.name}» отменено.`);
 }
-async function updateToken(token, changes) {
-  if (!await token.update(changes)) throw new Error('Изменение света токена отменено.');
+/** Persist one scalar without rebuilding Item/Actor sheets on all connected clients. */
+async function saveRemaining(item,remaining) {
+  if(item.getFlag(NS,'light')?.remainingSeconds===remaining) return;
+  if(!await item.update({[`flags.${NS}.light.remainingSeconds`]:remaining},{render:false})) throw new Error(`Сохранение «${item.name}» отменено.`);
+}
+async function updateToken(token, changes, options={}) {
+  if (!await token.update(changes,options)) throw new Error('Изменение света токена отменено.');
+  activeSources.sync(token); updateHeartbeat();
 }
 
+/** Persist fuel and restore light in one token transition; retain unexpired disposable stubs. */
 async function turnOff(token, runtime, {expired = false, discard = false} = {}) {
   const item = token.actor?.items.get(runtime.itemId);
   if (runtime.config.mode === 'tank' && item && runtime.actorKey === actorKey(token)) {
-    const c = getConfig(item); c.remainingSeconds = Math.max(0, runtime.remainingSeconds ?? 0);
-    await saveConfig(item,c);
+    await saveRemaining(item,Math.max(0,runtime.remainingSeconds ?? 0));
   }
   const stowed = stowedStates(token).filter(s => s.itemId !== runtime.itemId);
   if (!expired && !discard && isDisposable(runtime) && (runtime.remainingSeconds ?? 0) > 0) {
@@ -119,6 +138,7 @@ async function settle(token) {
   if (!runtime) return false;
   const item = token.actor?.items.get(runtime.itemId);
   // Migrate runtimes created before actor identity was recorded.
+  const migrated=!runtime.actorKey;
   runtime.actorKey ??= actorKey(token);
   if (runtime.actorKey !== actorKey(token) || (!isDisposable(runtime) &&
       (!item || !getConfig(item).enabled || getQuantity(item) < 1))) {
@@ -137,11 +157,15 @@ async function settle(token) {
     !runtime.lowFuelWarned && game.settings.get(NS,'lowFuelNotify');
   if (warn) runtime.lowFuelWarned=true;
   if (runtime.config.mode === 'tank' && item && changed) {
-    const c = getConfig(item); c.remainingSeconds = runtime.remainingSeconds;
-    await saveConfig(item,c);
+    await saveRemaining(item,runtime.remainingSeconds);
   }
   if (runtime.remainingSeconds <= 0) { await turnOff(token, runtime, {expired: true}); return true; }
-  if (changed || clockChanged || warn) await updateToken(token,{[`flags.${NS}.active`]:runtime});
+  if (changed || clockChanged || warn || migrated) {
+    const patch={ [`flags.${NS}.active.remainingSeconds`]:runtime.remainingSeconds,[`flags.${NS}.active.lastAt`]:now };
+    if(warn) patch[`flags.${NS}.active.lowFuelWarned`]=true;
+    if(migrated) patch[`flags.${NS}.active.actorKey`]=runtime.actorKey;
+    await updateToken(token,patch,{render:false});
+  }
   if (warn) {
     const whisper=game.users.filter(user=>user.isGM || (!token.hidden && token.actor?.testUserPermission(user,'OWNER'))).map(user=>user.id);
     await ChatMessage.create({whisper,content:`<div class="fbl-lk-message"><strong>Свет догорает</strong><p>${escapeHtml(runtime.itemName)} · ${escapeHtml(token.name)}<br>Осталось ${displayTime(next)}.</p></div>`});
@@ -149,6 +173,7 @@ async function settle(token) {
   return false;
 }
 
+/** Validate stock, exclusive tank use and ignition before extinguishing an existing source. */
 function activationPlan(token, itemId) {
   const actor = token.actor;
   const stowed = stowedStates(token).find(s => s.itemId === itemId);
@@ -171,12 +196,13 @@ function activationPlan(token, itemId) {
   if (config.mode !== 'infinite' && remaining <= 0) throw new Error('Топливо или заряд закончились.');
   let ignitionItem = null;
   if (config.ignitionMode !== 'self') {
-    ignitionItem = findResource(actor,config.ignitionResource,config.ignitionItem,catalog(),itemId);
+    ignitionItem = resourceFor(actor,config.ignitionResource,config.ignitionItem,itemId);
     if (!ignitionItem) throw new Error(`Для включения нужен предмет розжига: «${resourceLabel(config.ignitionResource,config.ignitionItem)}».`);
   }
   return {item,config,remaining,resume,stowed,ignitionItem};
 }
-function resourceLabel(id,fallback) { return (catalog().resources.find(r=>r.id===id)?.label ?? fallback) || 'не задан'; }
+function resourceLabel(id,fallback) { return (presets().resourcesById.get(id)?.label ?? fallback) || 'не задан'; }
+/** Start a fresh source or stub, compensating already-spent stock on failed writes. */
 async function activate(token, itemId) {
   if (activeState(token)) throw new Error('Сначала погасите текущий источник света.');
   const {item,config,remaining,resume,stowed,ignitionItem}=activationPlan(token,itemId);
@@ -204,6 +230,7 @@ async function activate(token, itemId) {
   return `Зажжён: ${runtime.itemName}.`;
 }
 
+/** Settle elapsed time before extinguishing, including fuel expiry during the action. */
 async function switchOff(token) {
   if (!activeState(token)) throw new Error('У персонажа нет включённого источника.');
   const expired = await settle(token);
@@ -212,13 +239,14 @@ async function switchOff(token) {
   return 'Источник света выключен.';
 }
 
+/** Refill the actual tank holder, preserving both stock and fuel if the token write fails. */
 async function refill(token, itemId) {
   const actor = token.actor;
   const item = actor.items.get(itemId);
   if (!item) throw new Error('Предмет не найден.');
   let config = getConfig(item);
   if (!config.enabled || config.mode !== 'tank') throw new Error('Этот предмет нельзя заправлять.');
-  const fuel = findResource(actor,config.refillResource,config.refillItem,catalog(),item.id);
+  const fuel = resourceFor(actor,config.refillResource,config.refillItem,item.id);
   if (!fuel) throw new Error(`Нужен запас топлива: «${resourceLabel(config.refillResource,config.refillItem)}».`);
   const holder = runningTank(token, itemId);
   if (holder) {
@@ -251,6 +279,7 @@ async function refill(token, itemId) {
   return `Заправлен: ${item.name}. Осталось ${displayTime(result)}.`;
 }
 
+/** Toggle emission without stopping the fuel clock. */
 async function shutter(token) {
   if (!activeState(token)?.config.shutter) throw new Error('У источника нет шторок.');
   if (await settle(token)) return 'Источник света погас.';
@@ -258,6 +287,7 @@ async function shutter(token) {
   await updateToken(token,{light:runtime.shutterClosed?{...lightData(runtime.config),bright:0,dim:0}:lightData(runtime.config),[`flags.${NS}.active`]:runtime});
   return runtime.shutterClosed?'Шторки закрыты. Топливо продолжает расходоваться.':'Шторки открыты.';
 }
+/** Apply a bounded GM time correction without spending inventory resources. */
 async function adjustTime(token,delta) {
   if (!Number.isFinite(delta) || Math.abs(delta)>86400) throw new Error('Некорректная поправка времени.');
   if (!activeState(token) || activeState(token).config.mode==='infinite') throw new Error('Нужен работающий источник с конечным запасом.');
@@ -276,6 +306,7 @@ async function adjustTime(token,delta) {
   return `Осталось ${displayTime(runtime.remainingSeconds)}.`;
 }
 
+/** Recheck authority and ownership inside the inventory queue before applying an action. */
 async function doAction(request, userId) {
   if (!isAuthority()) throw new Error('Управление передано другому ГМу. Повторите действие.');
   if (!request || typeof request !== 'object') throw new Error('Некорректный запрос.');
@@ -299,6 +330,7 @@ async function doAction(request, userId) {
     return refill(token, request.itemId);
   });
 }
+/** Run locally on the elected GM or await a correlated authenticated User-document response. */
 async function requestAction(token, action, itemId = '', options = {}) {
   const gm = leadGM();
   if (!gm) { warning('Для управления светом необходим подключённый ГМ.'); return; }
@@ -324,6 +356,7 @@ async function requestAction(token, action, itemId = '', options = {}) {
   } catch(e) { warning(e.message); console.error(`[${NS}]`,e); return null; }
 }
 
+/** Handle server-originated User diffs; never trust a requester identity inside the payload. */
 async function onUserUpdate(user, changes, _options, userId) {
   // Foundry hooks receive a diff, so repeated actions may only change the ID.
   const response = changes.flags?.[NS]?.result ? user.getFlag(NS,'result') : null;
@@ -344,10 +377,12 @@ async function onUserUpdate(user, changes, _options, userId) {
   await user.setFlag(NS,'result',result).catch(error => console.error(`[${NS}] Ошибка отправки ответа`,error));
 }
 
+/** Provide a presentation-only copy with locally interpolated fuel, without writing documents. */
 function activeView(token) {
   const state=token?activeState(token):null;
   return state?{...state,remainingSeconds:state.config.mode==='infinite'?null:remainingAt(state)}:null;
 }
+/** Build inventory availability on demand; it is not part of the one-second clock path. */
 function viewModel(token) {
   const active=activeView(token);
   const sources=[];
@@ -356,24 +391,26 @@ function viewModel(token) {
     for(const item of availableItems(token.actor)) {
       if(stowed.some(s=>s.itemId===item.id)) continue;
       const identified=identify(item); const c=identified.config;
+      const holder=c.mode==='tank'?runningTank(token,item.id):null;
       let blocked='';
       if(getQuantity(item)<1) blocked='Нужна целая единица предмета';
       else if(c.mode!=='infinite' && c.remainingSeconds<=0) blocked='Сначала заправьте источник';
-      else if(c.mode==='tank' && runningTank(token,item.id) && runningTank(token,item.id)!==token) blocked='Источник на другом токене';
-      else if(c.ignitionMode!=='self' && !findResource(token.actor,c.ignitionResource,c.ignitionItem,catalog(),item.id)) blocked='Нет розжига: '+resourceLabel(c.ignitionResource,c.ignitionItem);
-      const fuel=findResource(token.actor,c.refillResource,c.refillItem,catalog(),item.id);
+      else if(holder && holder!==token) blocked='Источник на другом токене';
+      else if(c.ignitionMode!=='self' && !resourceFor(token.actor,c.ignitionResource,c.ignitionItem,item.id)) blocked='Нет розжига: '+resourceLabel(c.ignitionResource,c.ignitionItem);
+      const fuel=resourceFor(token.actor,c.refillResource,c.refillItem,item.id);
       const current=active?.itemId===item.id;
       const remaining=current?active.remainingSeconds:c.remainingSeconds;
       sources.push({id:item.id,name:item.name,icon:identified.preset?.icon ?? (c.mode==='disposable'?'candle':'lantern'),
         active:current,blocked:current?'':blocked,detail:c.mode==='infinite'?'Без расхода':c.mode==='disposable'?
           (current?'Горит · '+displayTime(remaining)+' · запас ×'+getQuantity(item):'Запас ×'+getQuantity(item)+' · по '+displayTime(c.remainingSeconds)):displayTime(remaining),
         originLabel:identified.origin==='recognized'?'Шаблон: '+identified.preset.label:identified.preset?.label ?? 'Свои настройки',
+        timeLabel:displayTime(remaining),stockLabel:current && c.mode==='disposable'?' · запас ×'+getQuantity(item):'',fuelMissing:!fuel,
         refillable:c.mode==='tank',refillBlocked:!fuel?'Нет топлива: '+resourceLabel(c.refillResource,c.refillItem):remaining>=c.capacitySeconds?'Бак полный':'',
         refillHint:'1 шт. '+resourceLabel(c.refillResource,c.refillItem)+' → '+displayTime(c.refillSeconds)});
     }
     for(const s of stowed) {
       const c=normalizeConfig(s.config);
-      const missing=c.ignitionMode!=='self' && !findResource(token.actor,c.ignitionResource,c.ignitionItem,catalog(),s.itemId);
+      const missing=c.ignitionMode!=='self' && !resourceFor(token.actor,c.ignitionResource,c.ignitionItem,s.itemId);
       sources.push({id:s.itemId,name:s.itemName+' · огарок',icon:'candle',active:false,refillable:false,
         detail:displayTime(s.remainingSeconds),originLabel:'Уже списан из стопки',blocked:missing?'Нет розжига: '+resourceLabel(c.ignitionResource,c.ignitionItem):''});
     }
@@ -384,10 +421,12 @@ function viewModel(token) {
 }
 function configureItem(item) { return windows?.openItem(item); }
 function openTokenMenu(token=canvas?.tokens?.controlled?.[0]) { return windows?.open(token); }
+/** Find the selected or visible token representing this exact inventory. */
 function tokenForActor(actor) {
   return canvas?.tokens?.controlled?.find(t=>t.actor?.uuid===actor.uuid) ??
     canvas?.tokens?.placeables?.find(t=>t.actor?.uuid===actor.uuid);
 }
+/** Reuse a requested source, saved stub or previous source for a single quick action. */
 async function quickToggle(token=canvas?.tokens?.controlled?.[0],itemId='') {
   const doc=token?.document ?? token;
   if(!doc?.actor) return warning('Выберите токен персонажа.');
@@ -399,6 +438,7 @@ async function quickToggle(token=canvas?.tokens?.controlled?.[0],itemId='') {
   if(!chosen) return openTokenMenu(token);
   return requestAction(doc,'switch',chosen);
 }
+/** Append one styled HUD control while leaving existing Foundry controls intact. */
 function installHUD(app,html) {
   const token=app.object;
   if(!token?.actor || !canOperate(game.user,token.document)) return;
@@ -412,6 +452,7 @@ function installHUD(app,html) {
   button.addEventListener('click',event=>{event.preventDefault();event.stopPropagation(); if(event.shiftKey) void quickToggle(token); else openTokenMenu(token);});
   holder.append(button);
 }
+/** Add inventory actions only on recognized source rows; no Item-header buttons are installed. */
 function installSheet(app,html) {
   const actor=app.actor ?? app.document ?? app.object;
   if(!actor?.items) return;
@@ -433,38 +474,91 @@ function installSheet(app,html) {
   }
 }
 
+/** Run only on the elected GM, while finite sources burn and the world is not paused. */
+function updateHeartbeat() {
+  const needed=ready && isAuthority() && !game.paused && activeSources.finiteCount>0;
+  if(needed && heartbeat===null) heartbeat=setInterval(heartbeatTick,5000);
+  else if(!needed && heartbeat!==null) { clearInterval(heartbeat); heartbeat=null; }
+}
+/** Keep the last pause state before the oldest live timestamp; bound history on every client. */
+function prunePauseHistory() {
+  if(pauseHistory.length<2) return;
+  let cutoff=Date.now();
+  for(const token of activeSources.values()) {
+    const state=token.getFlag(NS,'active');
+    if(state?.config.mode!=='infinite' && Number.isFinite(state?.lastAt)) cutoff=Math.min(cutoff,state.lastAt);
+  }
+  let first=0;
+  while(first+1<pauseHistory.length && pauseHistory[first+1].at<=cutoff) first++;
+  if(first) pauseHistory=pauseHistory.slice(first);
+}
+/** Independent inventories checkpoint concurrently; each shared inventory retains its queue. */
 async function heartbeatTick() {
-  if (!isAuthority()) return;
-  for (const token of sceneTokens()) {
-    if (!activeState(token)) continue;
-    if (locks.has(lockKey(token))) continue;
-    try { await withLock(token,()=>settle(token)); }
-    catch (error) {
-      if (!errors.has(token.uuid ?? token.id)) { console.error(`[${NS}] Ошибка таймера:`, token.name, error); errors.add(token.uuid ?? token.id); }
+  if(!isAuthority() || ticking) return;
+  ticking=true;
+  try {
+    const groups=new Map();
+    for(const token of activeSources.values()) {
+      const key=actorKey(token);
+      if(locks.has(key)) continue;
+      if(!groups.has(key)) groups.set(key,[]); groups.get(key).push(token);
     }
-  }
+    await Promise.all([...groups.values()].map(tokens=>withLock(tokens[0],async()=>{
+      for(const token of tokens) {
+        try { if(isAuthority()) await settle(token); errors.delete(token.uuid ?? token.id); }
+        catch(error) {
+          const key=token.uuid ?? token.id;
+          if(!errors.has(key)) { console.error('['+NS+'] Ошибка таймера:',token.name,error);errors.add(key); }
+        }
+      }
+    })));
+    prunePauseHistory();
+  } finally { ticking=false; updateHeartbeat(); }
 }
+/** Record boundaries synchronously even when a document write is still pending. */
 async function onPause(paused) {
-  pauseHistory.push({at:Date.now(),paused});
-  windows?.refresh();
-  if (!isAuthority()) return;
-  for (const token of sceneTokens()) {
-    if (!activeState(token)) continue;
+  pauseHistory.push({at:Date.now(),paused}); updateHeartbeat(); windows?.refresh();
+  if(!isAuthority()) return;
+  for(const token of [...activeSources.values()]) {
     try { await withLock(token,()=>settle(token)); }
-    catch(error) { console.error(`[${NS}] Ошибка переключения паузы`,error); }
+    catch(error) { console.error('['+NS+'] Ошибка переключения паузы',error); }
   }
-  windows?.refresh();
+  prunePauseHistory();
 }
+/** Unrelated player connections neither write documents nor reset a running clock. */
 async function resumeOnAuthorityChange() {
+  const previous=authorityId, authority=isAuthority(); updateHeartbeat();
+  if(previous===authorityId) return;
   windows?.refresh();
-  if (!isAuthority()) return;
-  for (const token of sceneTokens()) {
-    if (!activeState(token) || locks.has(lockKey(token))) continue;
-    // remainingAt excludes time before this GM actually took authority.
+  if(!authority) return;
+  for(const token of [...activeSources.values()]) {
     try { await withLock(token,()=>settle(token)); }
-    catch(error) { console.error(`[${NS}] Ошибка восстановления таймера`,error); }
+    catch(error) { console.error('['+NS+'] Ошибка восстановления таймера',error); }
   }
-  windows?.refresh();
+}
+/** Movement and unrelated token edits do not read runtime flags or rebuild any panel. */
+function onTokenUpdate(token,changes) {
+  const paths=changedPaths(changes);
+  if(paths.some(path=>path.startsWith('flags.'+NS+'.active') || ['actorId','actorLink','delta'].some(key=>path===key || path.startsWith(key+'.')))) {
+    activeSources.sync(token); updateHeartbeat(); prunePauseHistory();
+  }
+  if(isAuthority() && paths.some(path=>['actorId','actorLink'].includes(path))) {
+    const state=token.getFlag(NS,'active');
+    if(state && state.actorKey!==actorKey(token)) void withLock(token,()=>settle(token)).catch(console.error);
+  }
+  windows?.refresh({type:'token',document:token,changes});
+}
+/** Inventory changes only affect their owning panel; invalid sources also stop during pause. */
+function onItemUpdate(item,changes={},options={}) {
+  windows?.refresh({type:'item',document:item,changes});
+  if(!isAuthority() || isClockUpdate(changes)) return;
+  const paths=changedPaths(changes);
+  if(!options.deleted && !paths.some(path=>path==='system.quantity' || path.startsWith('flags.'+NS+'.light.enabled'))) return;
+  for(const token of activeSources.values()) {
+    const state=token.getFlag(NS,'active');
+    if(state.itemId!==item.id || token.actor?.uuid!==item.parent?.uuid || isDisposable(state)) continue;
+    void withLock(token,()=>settle(token)).catch(error=>console.error('['+NS+'] Ошибка инвентаря',error));
+  }
 }
 
 /** Creates only world-item templates. Nothing is added to actors, scenes, or Item Piles automatically. */
@@ -483,26 +577,18 @@ Hooks.once('init',()=>{
   game.settings.register(NS,'allowPlayers',{name:'Разрешить игрокам управлять своим светом',scope:'world',config:true,type:Boolean,default:true});
   game.settings.register(NS,'autoRecognize',{name:'Распознавать источники по библиотеке',hint:'Предмет без своих настроек использует первый совпавший шаблон. При первом зажигании настройки закрепляются в предмете.',scope:'world',config:true,type:Boolean,default:true,onChange:()=>windows?.refresh()});
   game.settings.register(NS,'lowFuelNotify',{name:'Предупреждать о малом запасе',hint:'Одно сообщение владельцам и ГМу при достижении порога источника. Скрытые токены видят только ГМы.',scope:'world',config:true,type:Boolean,default:true});
-  game.settings.register(NS,'catalog',{scope:'world',config:false,type:Object,default:defaultCatalog(),onChange:()=>windows?.refresh()});
-  windows=createInterface({catalog,identify,viewModel,active:activeView,resolveToken,action:requestAction,isGM:()=>game.user.isGM,info,warning,
+  game.settings.register(NS,'catalog',{scope:'world',config:false,type:Object,default:defaultCatalog(),onChange:()=>{presetIndex=null;windows?.refresh();}});
+  windows=createInterface({catalog,identify,viewModel,active:activeView,timeLabel:displayTime,clockRunning:()=>!game.paused,resolveToken,action:requestAction,isGM:()=>game.user.isGM,info,warning,
     async saveItem(item,config) { await saveConfig(item,config); windows.refresh(); info(`Настройки «${item.name}» сохранены.`); },
     async saveCatalog(value) {
       if(!game.user.isGM) throw new Error('Библиотеку настраивает ГМ.');
-      await game.settings.set(NS,'catalog',normalizeCatalog(value)); windows.refresh();
+      await game.settings.set(NS,'catalog',normalizeCatalog(value)); presetIndex=null; windows.refresh();
     }});
   game.settings.registerMenu(NS,'templates',{name:'Библиотека источников света',label:'Открыть мастерскую',hint:'Шаблоны, распознаваемые названия, розжиг и топливо.',icon:'fa-solid fa-lightbulb',type:windows.Menu,restricted:true});
   game.keybindings.register(NS,'quickToggle',{name:'Быстро включить / погасить свет',hint:'Выбранный токен использует последний источник или сохранённый огарок.',editable:[{key:'KeyL',modifiers:['SHIFT']}],onDown:()=>{void quickToggle();return true;}});
   Hooks.on('getSceneControlButtons',controls=>{
     if (!controls.tokens?.tools) return;
     controls.tokens.tools['fbl-lightkeeper']={name:'fbl-lightkeeper',title:'Управление светом выбранного токена',icon:'fas fa-lightbulb',order:Object.keys(controls.tokens.tools).length,button:true,visible:true,onChange:()=>void openTokenMenu()};
-  });
-  Hooks.on('getHeaderControlsApplicationV2',(app,controls)=>{
-    if (app.document?.documentName !== 'Item' || !game.user?.isGM) return;
-    controls.push({action:'fbl-lightkeeper-config',label:'Свет / топливо',icon:'fas fa-lightbulb',onClick:()=>configureItem(app.document)});
-  });
-  Hooks.on('getItemSheetHeaderButtons',(app,buttons)=>{
-    if (!game.user?.isGM) return;
-    buttons.unshift({class:'fbl-lightkeeper',label:'Свет',icon:'fas fa-lightbulb',onclick:()=>configureItem(app.object ?? app.item)});
   });
   Hooks.on('getActorSheetHeaderButtons',(app,buttons)=>{
     buttons.unshift({class:'fbl-lightkeeper',label:'Свет',icon:'fa-solid fa-lightbulb',onclick:()=>{
@@ -513,7 +599,24 @@ Hooks.once('init',()=>{
   Hooks.on('renderTokenHUD',installHUD);
   Hooks.on('renderActorSheet',installSheet);
   Hooks.on('controlToken',(token,controlled)=>{if(controlled) windows.follow(token);});
-  for(const hook of ['updateToken','deleteToken','updateItem','createItem','deleteItem','updateActor']) Hooks.on(hook,()=>windows.refresh());
+  Hooks.on('updateToken',onTokenUpdate);
+  Hooks.on('createToken',token=>{activeSources.sync(token);updateHeartbeat();windows.refresh({type:'token',document:token,changes:{flags:{[NS]:{active:token.getFlag(NS,'active')}}}});});
+  Hooks.on('deleteToken',token=>{activeSources.remove(token);updateHeartbeat();windows.refresh({type:'deletedToken',document:token});});
+  Hooks.on('createScene',scene=>{for(const token of scene.tokens.contents) activeSources.sync(token);updateHeartbeat();});
+  Hooks.on('deleteScene',scene=>{activeSources.removeScene(scene);updateHeartbeat();windows.refresh({type:'scene',document:scene});});
+  Hooks.on('updateItem',onItemUpdate);
+  Hooks.on('createItem',item=>windows.refresh({type:'item',document:item,changes:{created:true}}));
+  Hooks.on('deleteItem',item=>onItemUpdate(item,{}, {deleted:true}));
+  Hooks.on('updateActor',(actor,changes)=>windows.refresh({type:'actor',document:actor,changes}));
+  Hooks.on('deleteActor',actor=>{
+    if(!isAuthority()) return;
+    for(const token of activeSources.values()) if(token.getFlag(NS,'active')?.actorKey===actor.uuid) {
+      void withLock(token,async()=>{
+        const runtime=activeState(token);
+        if(runtime) await turnOff(token,runtime,{discard:true});
+      }).catch(console.error);
+    }
+  });
   Hooks.on('pauseGame',onPause);
   Hooks.on('updateUser',onUserUpdate);
   Hooks.on('preCreateToken',token=>{
@@ -527,22 +630,24 @@ Hooks.once('init',()=>{
 Hooks.once('ready',async()=>{
   if (game.system.id !== 'forbidden-lands') console.warn(`[${NS}] Модуль предназначен для Forbidden Lands; система: ${game.system.id}`);
   pauseHistory = [{at:Date.now(),paused:game.paused}];
+  activeSources.rebuild(game.scenes.contents);
+  ready=true;
   // A small public API for macros and other modules.
   game.modules.get(NS).api={open:openTokenMenu,configure:configureItem,requestAction,createExamples,quickToggle,
     library:id=>windows.openLibrary(id),getCatalog:catalog,
     async applyPreset(item,id) {
       if(!game.user.isGM) throw new Error('Шаблон применяет ГМ.');
-      const preset=catalog().sources.find(s=>s.id===id); if(!preset) throw new Error('Шаблон не найден.');
+      const preset=presets().sourcesById.get(id); if(!preset) throw new Error('Шаблон не найден.');
       await saveConfig(item,{...preset.config,remainingSeconds:preset.config.capacitySeconds}); windows.refresh();
     }};
-  heartbeat=setInterval(heartbeatTick,5000);
-  clockTicker=setInterval(()=>windows.clock(),1000);
   await resumeOnAuthorityChange();
   Hooks.on('userConnected',resumeOnAuthorityChange);
+  Hooks.on('updateUser',(_user,changes)=>{if('role' in changes || 'active' in changes) return resumeOnAuthorityChange();});
 });
 Hooks.once('shutdown',()=>{
-  if(heartbeat)clearInterval(heartbeat);
-  if(clockTicker)clearInterval(clockTicker);
+  ready=false;
+  if(heartbeat!==null)clearInterval(heartbeat);
+  heartbeat=null; activeSources.clear(); presetIndex=null;
   void windows?.close();
   for (const wait of pending.values()) {
     clearTimeout(wait.timeout); wait.reject(new Error('Соединение с миром закрыто.'));

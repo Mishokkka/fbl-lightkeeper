@@ -1,18 +1,26 @@
 import {displayTime,normalizeConfig} from './logic.js';
 import {ICONS} from './presets.js';
 
+/** Escape user-controlled text for HTML text and attribute positions. */
 export const esc = value => String(value ?? '').replace(/[&<>"']/g,c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+/** Render only a known icon class from the module icon registry. */
 export const icon = name => `<i class="fa-solid ${ICONS[name] ?? ICONS.lantern}" aria-hidden="true"></i>`;
+/** Translate normalized source modes for the Russian interface. */
 export const modeName = mode => ({tank:'Бак / заряд',disposable:'Свеча / факел',infinite:'Без расхода'}[mode] ?? 'Источник');
+/** Display a tabular clock, rounding milliseconds up and treating null as infinity. */
 export function clockTime(seconds) {
   if (seconds === null || !Number.isFinite(seconds)) return '∞';
   const s = Math.ceil(Math.max(0,seconds));
   return [Math.floor(s/3600),Math.floor(s/60)%60,s%60].map(n => String(n).padStart(2,'0')).join(':');
 }
-export function button(action,label,{id='',iconName='',css='',disabled=false,title=''} = {}) {
-  return `<button type="button" class="lk-button ${esc(css)}" data-action="${esc(action)}" data-id="${esc(id)}" ${disabled?'disabled':''} title="${esc(title || label)}">${iconName?icon(iconName):''}<span>${esc(label)}</span></button>`;
+/** Render an accessible action button with escaped labels and data attributes. */
+export function button(action,label,{id='',iconName='',css='',disabled=false,title='',data={}} = {}) {
+  const attrs=Object.entries(data).map(([key,value])=>`data-${esc(key)}="${esc(value)}"`).join(' ');
+  return `<button type="button" class="lk-button ${esc(css)}" data-action="${esc(action)}" data-id="${esc(id)}" ${attrs} ${disabled?'disabled':''} title="${esc(title || label)}">${iconName?icon(iconName):''}<span>${esc(label)}</span></button>`;
 }
+/** Render the shared lantern brand and escaped window heading. */
 export const masthead = (eyebrow,title,subtitle='') => `<header class="lk-masthead"><div class="lk-emblem"><svg viewBox="0 0 32 40" aria-hidden="true" fill="none" stroke="#e4bd7d" stroke-width="1.4"><path d="M12 7V5a4 4 0 0 1 8 0v2M8 11l4-4h8l4 4M7 12h18M9 14v19M23 14v19M7 35h18M10 38h12"/><rect x="10" y="14" width="12" height="19" rx="2" fill="#17262d"/><path d="M16 29c-6 0-5-5-2-8 0 3 3 2 2-3 7 5 6 11 0 11Z" fill="#e4bd7d" stroke="none"/></svg></div><div><p class="lk-eyebrow">${esc(eyebrow)}</p><h2>${esc(title)}</h2>${subtitle?`<p class="lk-subtitle">${esc(subtitle)}</p>`:''}</div></header>`;
+/** Render the structural light panel; ticking clocks subsequently update individual DOM nodes. */
 export function renderPanel(model) {
   const {active,sources,gm,paused,authority,tokenName,canOperate=true} = model;
   const condition = !authority ? 'Ожидаем ГМа' : paused ? 'Мир на паузе' : 'Реальное время';
@@ -27,9 +35,10 @@ export function renderPanel(model) {
     <div class="lk-actions">${active.config.shutter?button('shutter',active.shutterClosed?'Открыть шторки':'Закрыть шторки',{iconName:'lantern',disabled:!canOperate}):''}${button('off','Погасить',{iconName:'candle',css:'lk-quiet',disabled:!canOperate})}</div>
   </section>` : `<section class="lk-unlit"><div class="lk-source-glyph">${icon('lantern')}</div><h3>Свет погашен</h3><p>Выберите источник из инвентаря.<br>Огарки сохраняют оставшееся время.</p></section>`;
   const rows = sources.map(s => `<article class="lk-source-row ${s.active?'lk-selected':''}" data-lk-name="${esc(s.name.toLocaleLowerCase())}">
-    <div class="lk-row-icon">${icon(s.icon)}</div><div class="lk-row-copy"><h4>${esc(s.name)}</h4><p>${esc(s.detail)}</p><small>${esc(s.originLabel)}</small></div>
+    <div class="lk-row-icon">${icon(s.icon)}</div><div class="lk-row-copy"><h4>${esc(s.name)}</h4><p>${s.active?`<span data-lk-current-detail>${esc(s.timeLabel ?? s.detail)}</span>${esc(s.stockLabel ?? '')}`:esc(s.detail)}</p><small>${esc(s.originLabel)}</small></div>
     <div class="lk-row-actions">${button(s.active?'off':'ignite',s.active?'Погасить':active?'Заменить':'Зажечь',{id:s.id,css:s.active?'lk-quiet':'lk-primary',disabled:!canOperate || !!s.blocked,title:s.blocked || ''})}
-    ${s.refillable?button('refill','Заправить',{id:s.id,css:'lk-small lk-quiet',disabled:!canOperate || !!s.refillBlocked,title:s.refillBlocked || s.refillHint}):''}
+    ${s.refillable?button('refill','Заправить',{id:s.id,css:'lk-small lk-quiet',disabled:!canOperate || !!s.refillBlocked,title:s.refillBlocked || s.refillHint,
+      data:s.active && canOperate?{'lk-current-refill':'','has-fuel':!s.fuelMissing,'refill-hint':s.refillHint}: {}}):''}
     ${gm?button('configure','Настроить',{id:s.id,css:'lk-small lk-link'}):''}</div></article>`).join('');
   return `<div class="lk-panel">
     ${masthead('LIGHTKEEPER',tokenName || 'Выберите персонажа','Свет. Топливо. Время.')}
@@ -44,18 +53,23 @@ export function renderPanel(model) {
   </div>`;
 }
 
+/** Render a labelled input using only module-owned styling. */
 function field(name,label,value,{type='text',hint='',min='',max='',step='',list=''} = {}) {
   return `<label class="lk-field"><span>${esc(label)}</span><input name="${esc(name)}" type="${esc(type)}" value="${esc(value)}" ${min!==''?`min="${min}"`:''} ${max!==''?`max="${max}"`:''} ${step?`step="${step}"`:''} ${list?`list="${esc(list)}"`:''}>${hint?`<small>${esc(hint)}</small>`:''}</label>`;
 }
+/** Render escaped select options while preserving explicit empty-resource choices. */
 function select(name,label,value,choices,hint='') {
   return `<label class="lk-field"><span>${esc(label)}</span><select name="${esc(name)}">${choices.map(([id,label])=>`<option value="${esc(id)}" ${id===value?'selected':''}>${esc(label)}</option>`).join('')}</select>${hint?`<small>${esc(hint)}</small>`:''}</label>`;
 }
+/** Render a boolean setting with an optional explanatory hint. */
 function check(name,label,value,hint='') {
   return `<label class="lk-check"><input type="checkbox" name="${esc(name)}" ${value?'checked':''}><span>${esc(label)}${hint?`<small>${esc(hint)}</small>`:''}</span></label>`;
 }
+/** Round-trip alias arrays as editable lines, escaping their contents. */
 function textarea(name,label,value,hint='') {
   return `<label class="lk-field"><span>${esc(label)}</span><textarea name="${esc(name)}" rows="3">${esc(Array.isArray(value)?value.join('\n'):value)}</textarea>${hint?`<small>${esc(hint)}</small>`:''}</label>`;
 }
+/** Render source settings with minute units and visible missing-resource references. */
 export function configFields(c,catalog,{item=false} = {}) {
   const resources = [['','По названию ниже'],...catalog.resources.map(r => [r.id,r.label])];
   // Keep deleted resource references visible until the GM explicitly changes them.
@@ -82,21 +96,29 @@ export function configFields(c,catalog,{item=false} = {}) {
     ${field('refillMinutes','Одна заправка, мин',c.refillSeconds/60,{type:'number',min:1/60,max:10080,step:'any'})}
     </div></fieldset>`;
 }
+/** Convert minutes to seconds; blank numeric fields retain existing values, explicit zero remains valid. */
 export function readConfig(form,base,{item=false} = {}) {
   const value = name => form.elements.namedItem(name)?.value;
   const checked = name => !!form.elements.namedItem(name)?.checked;
   const raw = {...base};
+  const numeric=new Set(['bright','dim','angle','alpha','animationSpeed','animationIntensity']);
   for (const name of ['mode','bright','dim','angle','color','alpha','animation','animationSpeed','animationIntensity','ignitionMode','ignitionResource','refillResource','ignitionItem','refillItem']) {
-    if (value(name)!==undefined) raw[name] = value(name);
+    const input=value(name);
+    if (input!==undefined && !(numeric.has(name) && String(input).trim()==='')) raw[name] = input;
   }
-  raw.capacitySeconds = Number(value('capacityMinutes'))*60;
-  raw.remainingSeconds = item ? Number(value('remainingMinutes'))*60 : raw.capacitySeconds;
-  raw.refillSeconds = Number(value('refillMinutes'))*60;
-  raw.lowFuelSeconds = Number(value('lowFuelMinutes'))*60;
+  const seconds = (name,fallback) => {
+    const input=value(name);
+    return input===undefined || String(input).trim()==='' ? fallback : Number(input)*60;
+  };
+  raw.capacitySeconds = seconds('capacityMinutes',base?.capacitySeconds);
+  raw.remainingSeconds = item ? seconds('remainingMinutes',base?.remainingSeconds) : raw.capacitySeconds;
+  raw.refillSeconds = seconds('refillMinutes',base?.refillSeconds);
+  raw.lowFuelSeconds = seconds('lowFuelMinutes',base?.lowFuelSeconds);
   raw.shutter = checked('shutter');
   if (item) raw.enabled = checked('enabled');
   return normalizeConfig(raw);
 }
+/** Render an individual source editor with pinned save actions. */
 export function renderItemEditor(item,c,catalog,origin) {
   return `<div class="lk-editor">${masthead('НАСТРОЙКА ПРЕДМЕТА',item.name,'Настройки сохраняются вместе с предметом.')}
     <div class="lk-item-scroll"><div class="lk-preset-picker">${select('templateChoice','Заполнить из шаблона',c.templateId,[['','Свои настройки'],...catalog.sources.map(s=>[s.id,s.label])])}${button('load-preset','Применить',{css:'lk-primary'})}</div>
@@ -105,6 +127,7 @@ export function renderItemEditor(item,c,catalog,origin) {
     <p class="lk-hint">Новые параметры применяются при следующем зажигании. Для работающего источника используйте панель света.</p></div>
     <div class="lk-actions lk-editor-footer">${button('save','Сохранить предмет',{css:'lk-primary'})}${button('save-template','Как новый шаблон',{iconName:'magic',css:'lk-quiet'})}</div></div>`;
 }
+/** Render a draft library; an empty section is valid and remains importable. */
 export function renderLibrary(catalog,kind,selectedId,{dirty=false,importInfo=''} = {}) {
   const entries = catalog[kind];
   const entry = entries.find(e=>e.id===selectedId);

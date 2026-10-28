@@ -7,11 +7,13 @@ const real = {now:Date.now, setInterval, clearInterval, error:console.error};
 let serial = 0;
 let env;
 
+/** Provide Foundry-style collection lookup and a snapshot contents array. */
 function collection(values = []) {
   values.get = id => values.find(value => value.id === id);
   Object.defineProperty(values,'contents',{get:() => [...values]});
   return values;
 }
+/** Model recursive document merges rather than replacing nested flag objects. */
 function merge(target, source) {
   for (const [key,value] of Object.entries(source)) {
     if (value && typeof value === 'object' && !Array.isArray(value)) {
@@ -20,6 +22,7 @@ function merge(target, source) {
     } else target[key] = clone(value);
   }
 }
+/** Apply dotted document changes used by both actions and lean checkpoints. */
 function apply(target, changes) {
   for (const [path,value] of Object.entries(changes)) {
     const parts = path.split('.');
@@ -29,6 +32,7 @@ function apply(target, changes) {
   }
 }
 function flag(ns,key) { return key.split('.').reduce((o,k) => o?.[k],this.flags?.[ns]); }
+/** Build an embedded Item whose update methods can be failed or cancelled by a test. */
 function makeItem(actor,id,config = {},quantity = 1,name = id) {
   const item = {id,name,parent:actor,documentName:'Item',system:{quantity},
     flags:{[NS]:{light:{enabled:true,mode:'tank',capacitySeconds:100,remainingSeconds:100,
@@ -38,9 +42,11 @@ function makeItem(actor,id,config = {},quantity = 1,name = id) {
   actor.items.push(item);
   return item;
 }
+/** Represent one inventory and a predictable owner permission check. */
 function makeActor(uuid = 'Actor.A1') {
   return {id:'A1',uuid,items:collection(),testUserPermission:user => user.id === 'P1'};
 }
+/** Track source flags and light restoration with native-style nested updates. */
 function makeToken(actor,id = 'T1',scene = env.scene) {
   const token = {id,uuid:`Scene.${scene.id}.Token.${id}`,name:'Персонаж',actor,parent:scene,
     flags:{[NS]:{}},currentLight:{bright:0,dim:0,angle:360,color:null,alpha:0.5,
@@ -57,6 +63,7 @@ function makeToken(actor,id = 'T1',scene = env.scene) {
   scene.tokens.push(token);
   return token;
 }
+/** Emit authenticated User update hooks when simulated request flags change. */
 function makeUser(id,isGM) {
   return {id,isGM,active:true,flags:{},getFlag:flag,
     async setFlag(ns,key,value) {
@@ -68,6 +75,7 @@ beforeEach(async () => {
   const listeners = new Map();
   const register = (name,fn) => listeners.set(name,[...(listeners.get(name) ?? []),fn]);
   const settings = new Map();
+  const settingConfigs = new Map();
   env = {now:100000,notices:[],chat:[],timers:[],listeners,settings,
     fire:async (name,...args) => { for (const fn of listeners.get(name) ?? []) await fn(...args); }};
   Date.now = () => env.now;
@@ -88,8 +96,8 @@ beforeEach(async () => {
   env.api = {};
   globalThis.game = {user:env.gm,users:env.users,system:{id:'forbidden-lands'},paused:false,
     modules:{get:() => env.api},scenes:collection([env.scene]),
-    settings:{register:(ns,key,c) => settings.set(`${ns}.${key}`,c.default),get:(ns,key) => settings.get(`${ns}.${key}`),
-      registerMenu:()=>{},set:async(ns,key,value)=>settings.set(`${ns}.${key}`,value)},keybindings:{register:()=>{}},
+    settings:{register:(ns,key,c) => {settings.set(`${ns}.${key}`,c.default);settingConfigs.set(`${ns}.${key}`,c);},get:(ns,key) => settings.get(`${ns}.${key}`),
+      registerMenu:()=>{},set:async(ns,key,value)=>{settings.set(`${ns}.${key}`,value);settingConfigs.get(`${ns}.${key}`)?.onChange?.(value);}},keybindings:{register:()=>{}},
     socket:{on:() => assert.fail('Unauthenticated module socket must not be used'),emit:() => assert.fail('Unexpected socket')}};
   globalThis.ui = {notifications:{info:m => env.notices.push(m),warn:m => env.notices.push(m)}};
   globalThis.ChatMessage = {create:async data => env.chat.push(data)};
@@ -100,7 +108,7 @@ beforeEach(async () => {
   env.action = (action,itemId = 'LAMP',token = env.token) => env.api.api.requestAction(token,action,itemId);
   env.active = (token = env.token) => token.getFlag(NS,'active');
   env.remaining = () => env.lamp.getFlag(NS,'light').remainingSeconds;
-  env.tick = () => env.timers[0]();
+  env.tick = () => env.timers[0]?.();
   env.pause = async paused => { game.paused = paused; await env.fire('pauseGame',paused); };
 });
 afterEach(async () => {
@@ -136,7 +144,8 @@ test('rapid toggles preserve fractional fuel',async () => {
 test('connecting a player does not reset elapsed time',async () => {
   await env.action('on'); env.now += 3500;
   await env.fire('userConnected',env.player,true);
-  assert.equal(env.remaining(),96.5);
+  assert.equal(env.remaining(),100);
+  await env.action('off'); assert.equal(env.remaining(),96.5);
 });
 
 test('time without a GM is excluded on reconnect',async () => {
@@ -159,11 +168,11 @@ test('reload ignores downtime but preserves saved active fuel',async () => {
 test('pause and unpause are accounted for while an inventory write is pending',async () => {
   await env.action('on');
   let release;
-  const original = env.lamp.setFlag;
-  env.lamp.setFlag = async function(ns,key,value) {
+  const original = env.lamp.update;
+  env.lamp.update = async function(changes) {
     await new Promise(resolve => { release = resolve; });
-    this.setFlag = original;
-    return original.call(this,ns,key,value);
+    this.update = original;
+    return original.call(this,changes);
   };
   env.now += 10000;
   const tick = env.tick();
@@ -350,7 +359,7 @@ test('cancelled document updates refund activation resources',async () => {
 
 test('a failed fuel-state write does not mutate live runtime',async () => {
   await env.action('on'); const before = clone(env.active()); env.now += 2500;
-  env.lamp.setFlag = async () => { throw new Error('Item write failed'); };
+  env.lamp.update = async () => { throw new Error('Item write failed'); };
   await env.tick();
   assert.deepEqual(env.active(),before);
   assert.equal(env.remaining(),100);
@@ -395,7 +404,7 @@ test('an unconfigured candle uses a template and pins its settings on first igni
   assert.equal(candle.system.quantity,1); assert.equal(matches.system.quantity,1);
   assert.equal(candle.getFlag(NS,'light').templateId,'candle');
   const catalog=env.api.api.getCatalog(); catalog.sources[0].config.capacitySeconds=9999;
-  env.settings.set(`${NS}.catalog`,catalog);
+  await game.settings.set(NS,'catalog',catalog);
   assert.equal(env.active().config.capacitySeconds,1800);
 });
 
