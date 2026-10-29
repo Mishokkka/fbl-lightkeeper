@@ -1,4 +1,4 @@
-import {normalizeConfig} from './logic.js';
+import {normalizeConfig,normalizeIgniter} from './logic.js';
 import {defaultCatalog,normalizeCatalog,lines} from './presets.js';
 import {renderPanel,renderItemEditor,renderLibrary,readConfig,readIgniter,clockTime} from './views.js';
 import {panelUpdateKind} from './runtime.js';
@@ -254,7 +254,8 @@ export function createInterface(services) {
       else if (action==='kind') { this.kind=id; this.selectedId=this.draft[id][0]?.id; }
       else if (action==='new') {
         const key=foundry.utils.randomID();
-        entries.push({id:key,label:this.kind==='sources'?'Новый источник':'Новый запас',icon:this.kind==='sources'?'lantern':'fuel',names:[],uuids:[],itemTypes:[],matchMode:'exact',config:normalizeConfig({enabled:true})});
+        entries.push({id:key,label:this.kind==='sources'?'Новый источник':'Новый запас',icon:this.kind==='sources'?'lantern':'fuel',names:[],uuids:[],itemTypes:[],matchMode:'exact',
+          ...(this.kind==='sources'?{config:normalizeConfig({enabled:true})}:{ignition:normalizeIgniter()})});
         this.selectedId=key; this.dirty=true;
       } else if (action==='delete' && index>=0) { entries.splice(index,1); this.selectedId=entries[Math.min(index,entries.length-1)]?.id; this.dirty=true; }
       else if (['up','down'].includes(action) && index>=0) {

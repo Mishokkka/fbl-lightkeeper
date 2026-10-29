@@ -67,6 +67,26 @@ try {
   await library.locator('[name="igniterMode"]').selectOption('bonus');
   await library.getByRole('button',{name:'Сохранить библиотеку',exact:true}).click();
   await page.waitForFunction(()=>demo.api.getCatalog().resources[0].names.includes('Коробок спичек'));
+  // CodeRabbit regression: a fresh resource must not retain or overwrite the previous form.
+  const previousResource=await page.evaluate(()=>demo.api.getCatalog().resources[0]);
+  await library.getByRole('button',{name:'Новый',exact:true}).click();
+  await library.getByRole('heading',{name:'Новый запас',exact:true}).waitFor();
+  assert.equal(await library.locator('[name="label"]').inputValue(),'Новый запас');
+  assert.equal(await library.locator('[name="names"]').inputValue(),'');
+  assert.equal(await library.locator('[name="igniterMode"]').inputValue(),'none');
+  await library.locator('[name="label"]').fill('Коробок врача');
+  await library.locator('[name="names"]').fill('Коробок врача');
+  await library.locator('[name="igniterMode"]').selectOption('bonus');
+  await library.locator(`[data-action="select"][data-id="${previousResource.id}"]`).click();
+  assert.equal(await library.locator('[name="label"]').inputValue(),previousResource.label);
+  await library.getByRole('button',{name:'Сохранить библиотеку',exact:true}).click();
+  await page.waitForFunction(()=>demo.api.getCatalog().resources.some(r=>r.label==='Коробок врача'));
+  assert.deepEqual(await page.evaluate(id=>demo.api.getCatalog().resources.find(r=>r.id===id),previousResource.id),previousResource);
+  const newResource=await page.evaluate(()=>demo.api.getCatalog().resources.find(r=>r.label==='Коробок врача'));
+  await library.locator(`[data-action="select"][data-id="${newResource.id}"]`).click();
+  assert.equal(await library.locator('[name="names"]').inputValue(),'Коробок врача');
+  assert.equal(await library.locator('[name="igniterMode"]').inputValue(),'bonus');
+  await library.locator(`[data-action="select"][data-id="${previousResource.id}"]`).click();
   const download=page.waitForEvent('download');
   await library.getByRole('button',{name:'Экспорт',exact:true}).click();
   const exported=await download; const data=JSON.parse(await fs.readFile(await exported.path(),'utf8'));

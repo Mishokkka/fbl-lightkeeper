@@ -154,7 +154,7 @@ export function renderLibrary(catalog,kind,selectedId,{dirty=false,importInfo=''
       <div class="lk-grid">${select('matchMode','Сопоставление названия',entry.matchMode,[['exact','Точное совпадение'],['contains','Название содержит вариант']])}${field('itemTypes','Типы Item через запятую',entry.itemTypes.join(', '),{hint:'Пусто — все типы; например gear, weapon'})}</div>
       <details class="lk-details"><summary>Устойчивые ссылки на предметы</summary>${textarea('uuids','UUID / исходный UUID из компендиума',entry.uuids,'Такие совпадения работают и после переименования.')}</details>
     </fieldset>
-    ${kind==='sources'?configFields(entry.config,catalog):`<fieldset class="lk-fieldset"><legend>Средство розжига</legend>${igniterField(entry.ignition.mode)}</fieldset>`}
+    ${kind==='sources'?configFields(entry.config,catalog):`<fieldset class="lk-fieldset"><legend>Средство розжига</legend>${igniterField(entry.ignition?.mode??'none')}</fieldset>`}
     </form>` : '<div class="lk-empty">Создайте шаблон или добавьте стандартные.</div>';
   return `<div class="lk-library">
     <div class="lk-library-toolbar"><nav class="lk-tabs" aria-label="Раздел библиотеки">${button('kind','Источники',{id:'sources',css:kind==='sources'?'lk-tab-active':''})}${button('kind','Розжиг и топливо',{id:'resources',css:kind==='resources'?'lk-tab-active':''})}</nav>${button('new','Новый',{css:'lk-primary'})}</div>

@@ -15,6 +15,14 @@ test('user names and library aliases remain text inside the rendered interface',
   const panel=renderPanel({tokenName:'<Bob>',sources:[],gm:false,paused:false,authority:true});
   assert.ok(panel.includes('&lt;Bob&gt;'));assert.ok(!panel.includes('data-action="adjust"'));
 });
+
+test('a resource draft without an ignition policy renders the unused default safely',()=>{
+  const catalog=defaultCatalog(),resource=catalog.resources[0];delete resource.ignition;
+  const html=renderLibrary(catalog,'resources',resource.id);
+  assert.ok(html.includes('name="igniterMode"'));
+  assert.ok(html.includes('value="none" selected'));
+  assert.equal(resource.ignition,undefined);
+});
 test('form values use minutes but preserve fractional fuel and resource references',()=>{
   const values={mode:'tank',capacityMinutes:'40',remainingMinutes:'14.375',refillMinutes:'20',lowFuelMinutes:'2',shutter:true,enabled:true,
     refillResource:'oil',requiresIgnition:true,canIgnite:true,igniterMode:'bonus',soundOn:'sounds/on.ogg',soundOff:'sounds/off.ogg',soundVolumePercent:'35',soundFadeSeconds:'1.5'};
