@@ -38,7 +38,8 @@ function makeItem(actor,id,config = {},quantity = 1,name = id) {
     flags:{[NS]:{light:{enabled:true,mode:'tank',capacitySeconds:100,remainingSeconds:100,
       bright:4,dim:6,ignitionMode:'self',...config}}},getFlag:flag,
     async setFlag(ns,key,value) { apply(this,{[`flags.${ns}.${key}`]:value}); return this; },
-    async update(changes) { apply(this,changes); return this; }};
+    async update(changes) { apply(this,changes); return this; },
+    async delete() {actor.items.splice(actor.items.indexOf(this),1);await env.fire('deleteItem',this);return this;}};
   actor.items.push(item);
   return item;
 }
@@ -132,6 +133,91 @@ test('real time, ignition, pause, refill and restoration of original light',asyn
   assert.deepEqual(env.token.currentLight,base);
   await env.action('refill');
   assert.equal(env.remaining(),100); assert.equal(env.oil.system.quantity,1);
+});
+
+test('a consumed last match disappears from the native inventory and a stub needs a new match',async()=>{
+  const candle=makeItem(env.actor,'CANDLE',{},2,'Свеча');candle.flags={};
+  const matches=makeItem(env.actor,'MATCH',{enabled:false},1,'Спички');
+  await env.action('on','CANDLE');assert.equal(matches.system.quantity,0);
+  assert.equal(env.actor.items.get('MATCH'),undefined);
+  env.now+=1000;await env.action('off');assert.equal(await env.action('on','CANDLE'),null);
+  assert.equal(candle.system.quantity,1);assert.equal(env.token.getFlag(NS,'stowedSources').length,1);
+});
+
+test('a consumable ignition Bonus spends one charge per fresh or resumed candle, keeping its Item',async()=>{
+  const candle=makeItem(env.actor,'CANDLE',{mode:'disposable',ignitionMode:'consume',ignitionItem:'Коробок',ignitionCost:'bonus'},2);
+  const box=makeItem(env.actor,'BOX',{enabled:false},1,'Коробок');box.system.bonus={value:3,max:8};
+  await env.action('on','CANDLE');assert.equal(box.system.bonus.value,2);assert.equal(box.system.bonus.max,8);
+  assert.equal(box.system.quantity,1);assert.equal(env.actor.items.get('BOX'),box);
+  env.now+=1000;await env.action('off');assert.equal(box.system.bonus.value,2);
+  await env.action('on','CANDLE');assert.equal(box.system.bonus.value,1);assert.equal(candle.system.quantity,1);
+});
+
+test('ignition skips empty Bonus items and never falls back to spending their quantity',async()=>{
+  makeItem(env.actor,'CANDLE',{mode:'disposable',ignitionMode:'consume',ignitionItem:'Кремень',ignitionCost:'bonus'});
+  const empty=makeItem(env.actor,'EMPTY',{enabled:false},2,'Кремень');empty.system.bonus={value:0,max:5};
+  const full=makeItem(env.actor,'FULL',{enabled:false},1,'Кремень');full.system.bonus={value:1,max:5};
+  await env.action('on','CANDLE');assert.equal(empty.system.bonus.value,0);assert.equal(full.system.bonus.value,0);
+  await env.action('off');assert.equal(await env.action('on','CANDLE'),null);
+  assert.equal(empty.system.quantity,2);assert.equal(full.system.quantity,1);
+});
+
+test('a reusable ignition tool never spends quantity or Bonus',async()=>{
+  makeItem(env.actor,'CANDLE',{mode:'disposable',ignitionMode:'require',ignitionItem:'Огниво',ignitionCost:'bonus'});
+  const tool=makeItem(env.actor,'TOOL',{enabled:false},1,'Огниво');tool.system.bonus={value:0,max:5};
+  await env.action('on','CANDLE');await env.action('off');await env.action('on','CANDLE');
+  assert.ok(env.active());assert.equal(tool.system.quantity,1);assert.equal(tool.system.bonus.value,0);
+});
+
+test('failed ignition returns Bonus and the candle without deleting either Item',async()=>{
+  const candle=makeItem(env.actor,'CANDLE',{mode:'disposable',ignitionMode:'consume',ignitionItem:'Спички',ignitionCost:'bonus'});
+  const box=makeItem(env.actor,'BOX',{enabled:false},1,'Спички');box.system.bonus={value:1,max:9};
+  env.token.update=async()=>{throw new Error('Token failed');};
+  assert.equal(await env.action('on','CANDLE'),null);assert.equal(box.system.bonus.value,1);
+  assert.equal(box.system.quantity,1);assert.equal(candle.system.quantity,1);
+  assert.equal(env.actor.items.get('CANDLE'),candle);assert.equal(env.actor.items.get('BOX'),box);
+});
+
+test('two linked tokens serialize the final ignition Bonus charge',async()=>{
+  const other=makeToken(env.actor,'OTHER');
+  makeItem(env.actor,'A',{mode:'disposable',ignitionMode:'consume',ignitionItem:'Огниво',ignitionCost:'bonus'});
+  makeItem(env.actor,'B',{mode:'disposable',ignitionMode:'consume',ignitionItem:'Огниво',ignitionCost:'bonus'});
+  const tool=makeItem(env.actor,'TOOL',{enabled:false},1,'Огниво');tool.system.bonus={value:1,max:5};
+  await Promise.all([env.action('on','A'),env.action('on','B',other)]);
+  assert.equal([env.token,other].filter(token=>env.active(token)).length,1);
+  assert.equal(tool.system.bonus.value,0);assert.equal(tool.system.quantity,1);
+});
+
+test('a cancelled Bonus update returns the candle without spending a charge',async()=>{
+  const candle=makeItem(env.actor,'CANDLE',{mode:'disposable',ignitionMode:'consume',ignitionItem:'Спички',ignitionCost:'bonus'});
+  const box=makeItem(env.actor,'BOX',{enabled:false},1,'Спички');box.system.bonus={value:1,max:5};box.update=async()=>undefined;
+  assert.equal(await env.action('on','CANDLE'),null);assert.equal(candle.system.quantity,1);assert.equal(box.system.bonus.value,1);assert.equal(env.active(),undefined);
+});
+
+test('cleanup failure cannot roll back a committed ignition',async()=>{
+  makeItem(env.actor,'CANDLE',{mode:'disposable',ignitionMode:'consume',ignitionItem:'Спички'});
+  const match=makeItem(env.actor,'MATCH',{enabled:false},1,'Спички');match.delete=async()=>{throw new Error('delete unavailable');};
+  assert.ok(await env.action('on','CANDLE'));assert.ok(env.active());assert.equal(match.system.quantity,0);
+  await env.action('off');assert.equal(await env.action('on','CANDLE'),null);
+});
+
+test('committed on/off transitions broadcast audio and duplicate delivery plays only once',async()=>{
+  const played=[];game.audio={interface:{},create:options=>({duration:2,async load(){},async play(playback){played.push({src:options.src,...playback});},schedule(){},async stop(){}})};
+  Object.assign(env.lamp.flags[NS].light,{soundOn:'on.ogg',soundOff:'off.ogg',soundVolume:.3,soundFadeSeconds:.2});
+  await env.action('on');env.lamp.flags[NS].light.soundOff='future.ogg';await env.action('off');
+  for(let i=0;i<10;i++)await Promise.resolve();
+  assert.deepEqual(played.map(p=>p.src),['on.ogg','off.ogg']);assert.ok(played.every(p=>p.volume===.3 && p.fade===200));
+  await env.fire('updateUser',env.gm,{flags:{[NS]:{sound:{id:env.gm.getFlag(NS,'sound').id}}}},{},env.gm.id);
+  assert.equal(played.length,2);
+});
+
+test('failed activation emits no audio, and audio failure cannot undo a successful source',async()=>{
+  Object.assign(env.lamp.flags[NS].light,{soundOn:'missing.ogg'});let creates=0;
+  game.audio={interface:{},create:()=>{creates++;throw new Error('audio failed');}};
+  const update=env.token.update;env.token.update=async()=>undefined;
+  assert.equal(await env.action('on'),null);assert.equal(creates,0);
+  env.token.update=update;assert.ok(await env.action('on'));for(let i=0;i<10;i++)await Promise.resolve();
+  assert.equal(creates,1);assert.ok(env.active());assert.equal(env.remaining(),100);
 });
 
 test('rapid toggles preserve fractional fuel',async () => {

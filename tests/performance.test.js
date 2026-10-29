@@ -24,6 +24,21 @@ test('closed player clients never start background intervals or write timers',as
   }
 });
 
+test('each of six clients on separate scenes receives an authenticated GM sound once',async()=>{
+  for(const client of ['P1','P2','P3','P4','P5','P6']) {
+    const env=await harness({client,active:0,inactive:0});let played=0;
+    try {
+      game.audio={interface:{},create:()=>({duration:1,async load(){},async play(){played++;},async stop(){}})};
+      const gm=env.users.get('GM'),cue={id:'shared-cue',src:'match.ogg',volume:.4,fadeSeconds:0};gm.getFlag=()=>cue;
+      for(let i=0;i<2;i++)await env.fire('updateUser',gm,{flags:{'fbl-lightkeeper':{sound:{id:cue.id}}}},{},gm.id);
+      for(let i=0;i<10;i++)await Promise.resolve();assert.equal(played,1);assert.equal(env.intervals.size,0);
+      const player=env.users.get(client);player.getFlag=()=>({...cue,id:'forged'});
+      await env.fire('updateUser',player,{flags:{'fbl-lightkeeper':{sound:{id:'forged'}}}},{},player.id);
+      assert.equal(played,1);
+    } finally {await env.close();}
+  }
+});
+
 test('pause, zero sources and closing the panel remove unnecessary intervals',async()=>{
   const env=await harness({active:1,openPanel:true});
   try {

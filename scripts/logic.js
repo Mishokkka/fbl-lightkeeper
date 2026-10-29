@@ -24,11 +24,16 @@ export function normalizeConfig(raw = {}) {
     refillItem: String(raw.refillItem ?? '').trim().slice(0, 120),
     refillSeconds: Math.round(limit(raw.refillSeconds, 1, 604800, 900)),
     ignitionMode,
+    ignitionCost: raw.ignitionCost==='bonus'?'bonus':'quantity',
     ignitionItem: String(raw.ignitionItem ?? '').trim().slice(0, 120),
     ignitionResource: String(raw.ignitionResource ?? '').trim().slice(0,64),
     refillResource: String(raw.refillResource ?? '').trim().slice(0,64),
     templateId: String(raw.templateId ?? '').trim().slice(0,64),
     shutter: !!raw.shutter,
+    soundOn:String(raw.soundOn??'').trim().slice(0,1024),
+    soundOff:String(raw.soundOff??'').trim().slice(0,1024),
+    soundVolume:limit(raw.soundVolume,0,1,0.5),
+    soundFadeSeconds:limit(raw.soundFadeSeconds,0,30,0),
     lowFuelSeconds: Math.round(limit(raw.lowFuelSeconds,0,604800,60)),
     bright: limit(raw.bright, 0, 200, 3),
     dim: limit(raw.dim, 0, 200, 6),
@@ -70,6 +75,12 @@ export function displayTime(seconds) {
 export function getQuantity(item) {
   const n = Number(item?.system?.quantity);
   return Number.isFinite(n) && n >= 0 ? n : 0;
+}
+/** Bonus is the visible current charge counter in Forbidden Lands; max is never changed by spending. */
+export function getResourceStock(item,unit='quantity') {
+  if(unit!=='bonus') return getQuantity(item);
+  const value=Number(item?.system?.bonus?.value);
+  return Number.isFinite(value) && value>=0?value:0;
 }
 /** Legacy exact-name lookup requiring at least one whole resource unit. */
 export function findNamedItem(actor, name, exceptId = '') {

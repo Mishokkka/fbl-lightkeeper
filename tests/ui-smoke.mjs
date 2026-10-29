@@ -20,7 +20,7 @@ try {
   assert.equal(await page.evaluate(()=>demo.token.light.bright),0);
   await panel.getByRole('button',{name:'Открыть шторки',exact:true}).click();
   await page.getByRole('button',{name:'Пауза мира',exact:true}).click();
-  await panel.locator('.lk-session').filter({hasText:'Мир на паузе'}).waitFor();
+  await panel.locator('.lk-session').filter({hasText:'Пауза'}).waitFor();
   const clock=await panel.locator('[data-lk-clock]').textContent();
   await page.waitForTimeout(1200);
   assert.equal(await panel.locator('[data-lk-clock]').textContent(),clock);
@@ -32,7 +32,7 @@ try {
   assert.equal(await page.evaluate(()=>demo.actor.items.get('CANDLE').system.quantity),2);
   await panel.getByRole('button',{name:'Шаблоны',exact:true}).click();
   const library=page.locator('#fbl-lightkeeper-library');
-  await library.getByRole('heading',{name:'Библиотека света'}).waitFor();
+  await library.locator('[name="label"]').waitFor();
   await library.locator('[name="label"]').fill('Свеча палаты');
   await library.locator('[name="names"]').fill('Свеча\nCandle\nВосковая свеча');
   await library.locator('[name="capacityMinutes"]').fill('45');
@@ -68,9 +68,27 @@ try {
   await editor.locator('[name="templateChoice"]').selectOption('hooded-lantern');
   await editor.getByRole('button',{name:'Применить',exact:true}).click();
   await editor.locator('[name="shutter"]:checked').waitFor();
+  await editor.locator('[name="ignitionMode"]').selectOption('require');
+  assert.equal(await editor.locator('[name="ignitionCost"]').isVisible(),false);
+  await editor.locator('[name="ignitionMode"]').selectOption('consume');
+  await editor.locator('[name="ignitionCost"]').selectOption('bonus');
+  assert.equal(await editor.locator('[name="ignitionItem"]').isVisible(),false);
+  await editor.locator('details:has([name="soundOn"])').evaluate(element=>element.open=true);
+  await page.evaluate(()=>{
+    foundry.applications.apps={FilePicker:{implementation:class {
+      constructor(options){this.options=options;}
+      render(){this.options.callback('sounds/ignite.ogg');}
+    }}};
+  });
+  await editor.locator('[data-action="browse-audio"][data-id="soundOn"]').click();
+  await editor.locator('[name="soundOff"]').fill('sounds/extinguish.ogg');
+  await editor.locator('[name="soundVolumePercent"]').fill('35');
+  await editor.locator('[name="soundFadeSeconds"]').fill('0.4');
   await editor.screenshot({path:path.join(output,'lightkeeper-item-editor.png')});
   await editor.getByRole('button',{name:'Сохранить предмет',exact:true}).click();
   await page.waitForFunction(()=>demo.actor.items.get('FLASH').getFlag('fbl-lightkeeper','light')?.shutter===true);
+  const saved=await page.evaluate(()=>demo.actor.items.get('FLASH').getFlag('fbl-lightkeeper','light'));
+  assert.equal(saved.ignitionCost,'bonus');assert.equal(saved.soundOn,'sounds/ignite.ogg');assert.equal(saved.soundOff,'sounds/extinguish.ogg');assert.equal(saved.soundVolume,.35);assert.equal(saved.soundFadeSeconds,.4);
   // CodeRabbit regression: optional blank numeric fields must preserve their prior values.
   await editor.waitFor({state:'hidden'});
   await panel.locator('.lk-source-row').filter({has:page.getByRole('heading',{name:'Карманный фонарик',exact:true})}).getByRole('button',{name:'Настроить',exact:true}).click();
@@ -82,6 +100,7 @@ try {
   await panel.locator('.lk-source-row').filter({has:page.getByRole('heading',{name:'Карманный фонарик',exact:true})}).getByRole('button',{name:'Настроить',exact:true}).click();
   await editor.locator('[name="remainingMinutes"]').waitFor();
   await page.evaluate(()=>demo.actor.items.get('FLASH').update({'flags.fbl-lightkeeper.light.remainingSeconds':2123}));
+  await editor.locator('details:has([name="color"])').evaluate(element=>element.open=true);
   await editor.locator('[name="color"]').fill('#aaccee');
   await editor.getByRole('button',{name:'Сохранить предмет',exact:true}).click();await editor.waitFor({state:'hidden'});
   assert.equal(await page.evaluate(()=>demo.actor.items.get('FLASH').getFlag('fbl-lightkeeper','light').remainingSeconds),2123);

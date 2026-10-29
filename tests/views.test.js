@@ -17,11 +17,12 @@ test('user names and library aliases remain text inside the rendered interface',
 });
 test('form values use minutes but preserve fractional fuel and resource references',()=>{
   const values={mode:'tank',capacityMinutes:'40',remainingMinutes:'14.375',refillMinutes:'20',lowFuelMinutes:'2',shutter:true,enabled:true,
-    refillResource:'oil',ignitionResource:'matches'};
+    refillResource:'oil',ignitionResource:'matches',ignitionMode:'consume',ignitionCost:'bonus',soundOn:'sounds/on.ogg',soundOff:'sounds/off.ogg',soundVolumePercent:'35',soundFadeSeconds:'1.5'};
   const form={elements:{namedItem:name=>name in values?{value:String(values[name]),checked:values[name]===true}:null}};
   const config=readConfig(form,normalizeConfig(),{item:true});
   assert.equal(config.remainingSeconds,862.5);assert.equal(config.capacitySeconds,2400);
   assert.equal(config.refillResource,'oil');assert.equal(config.lowFuelSeconds,120);assert.ok(config.shutter);
+  assert.equal(config.ignitionCost,'bonus');assert.equal(config.soundOn,'sounds/on.ogg');assert.equal(config.soundOff,'sounds/off.ogg');assert.equal(config.soundVolume,.35);assert.equal(config.soundFadeSeconds,1.5);
 });
 
 test('cleared numeric fields preserve the existing value instead of creating an empty one-second source',()=>{

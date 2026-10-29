@@ -47,9 +47,15 @@ export function createInterface(services) {
         const search=content.querySelector('[data-lk-search]'); search?.focus();
         if(search && caret!==null) { try { search.setSelectionRange(caret,caret); } catch {} }
       }
-      content.querySelectorAll('form').forEach(form => form.addEventListener('submit',e => {
-        e.preventDefault(); void this.run('save');
-      }));
+      content.querySelectorAll('form').forEach(form => {
+        form.addEventListener('submit',e=>{e.preventDefault();void this.run('save');});
+        const updateSections=()=>{
+          const value=name=>form.elements.namedItem(name)?.value;
+          const show={tank:value('mode')==='tank',ignition:value('ignitionMode')!=='self',cost:value('ignitionMode')==='consume',ignitionName:!value('ignitionResource'),refillName:!value('refillResource')};
+          for(const section of form.querySelectorAll('[data-lk-show]')) section.hidden=!show[section.dataset.lkShow];
+        };
+        form.addEventListener('change',updateSections);updateSections();
+      });
       content.addEventListener('keydown',this.handleSave ??= e => {
         if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase()==='s') { e.preventDefault(); void this.run('save'); }
       });
@@ -65,13 +71,19 @@ export function createInterface(services) {
       if (this.busy) return;
       this.busy = true;
       this.element?.classList.add('lk-busy');
-      try { await this.perform(action,id,target); }
+      try {
+        if(action==='browse-audio') {
+          const input=this.element.querySelector(`[name="${id}"]`);
+          const Picker=foundry.applications.apps.FilePicker.implementation;
+          new Picker({type:'audio',current:input.value,callback:path=>{input.value=path;input.dispatchEvent(new Event('input',{bubbles:true}));input.dispatchEvent(new Event('change',{bubbles:true}));}}).render({force:true});
+        } else await this.perform(action,id,target);
+      }
       catch(error) { showError(error); }
       finally { this.busy = false; this.element?.classList.remove('lk-busy'); if(this===panel && dirty) scheduleRefresh(); }
     }
   }
   class LightPanel extends Window {
-    static DEFAULT_OPTIONS = {id:'fbl-lightkeeper-panel',window:{title:'Lightkeeper · Источники света'},position:{width:490,height:760}};
+    static DEFAULT_OPTIONS = {id:'fbl-lightkeeper-panel',window:{title:'Lightkeeper'},position:{width:420,height:540}};
     /** Store document IDs rather than a stale token reference across scene updates. */
     setToken(token) {
       const doc = token?.document ?? token;
@@ -142,7 +154,7 @@ export function createInterface(services) {
     }
   }
   class ItemEditor extends Window {
-    static DEFAULT_OPTIONS = {window:{title:'Lightkeeper · Настройка предмета'},position:{width:620,height:760}};
+    static DEFAULT_OPTIONS = {window:{title:'Источник света'},position:{width:560,height:650}};
     /** Snapshot editable Item configuration; the running instance remains independent. */
     constructor(item) {
       super({id:`fbl-lightkeeper-item-${item.uuid ?? item.id}`}); this.item=item;
@@ -181,7 +193,7 @@ export function createInterface(services) {
     _onClose(options) { editors.delete(this.item.uuid ?? this.item.id); super._onClose(options); }
   }
   class PresetLibrary extends Window {
-    static DEFAULT_OPTIONS = {id:'fbl-lightkeeper-library',window:{title:'Lightkeeper · Библиотека шаблонов'},position:{width:900,height:820}};
+    static DEFAULT_OPTIONS = {id:'fbl-lightkeeper-library',window:{title:'Шаблоны света'},position:{width:800,height:710}};
     /** Share the library window opened from settings and the token panel. */
     constructor() {
       super();
@@ -192,7 +204,7 @@ export function createInterface(services) {
     _replaceHTML(html,content) {
       super._replaceHTML(html,content);
       content.querySelector('form')?.addEventListener('input',() => {
-        this.dirty=true; const state=this.element.querySelector('.lk-save-state'); if(state) state.textContent='Есть несохранённые изменения';
+        this.dirty=true; const state=this.element.querySelector('.lk-save-state'); if(state) state.textContent='Не сохранено';
       });
       content.querySelector('[data-lk-import]')?.addEventListener('change',e => { void this.importFile(e.target.files[0]).catch(showError); });
     }
