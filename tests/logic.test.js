@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {normalizeConfig, lightData, tickRemaining, getQuantity, findNamedItem, displayTime} from '../scripts/logic.js';
+import {normalizeConfig, lightData, tickRemaining, getQuantity, findNamedItem, displayTime,igniterStatus,refillAmount,refillHint} from '../scripts/logic.js';
 test('normalization clamps and handles invalid fields', () => {
   const c = normalizeConfig({enabled:true, mode:'tank', capacitySeconds:30, remainingSeconds:99, dim:-7, bright:30, angle:400});
   assert.equal(c.remainingSeconds, 30); assert.equal(c.dim, 0); assert.equal(c.angle, 360);
@@ -53,4 +53,11 @@ test('item quantity and names', () => {
   assert.equal(findNamedItem({items},'масло'),null);
   assert.equal(getQuantity(items[0]),2);
   assert.equal(displayTime(3605),'1 ч 00 м');
+});
+
+test('Bonus stock remains readable when empty, and refill hints report discarded fuel',()=>{
+  const box={name:'Коробок',system:{quantity:1,bonus:{value:0,max:8}}};
+  const status=igniterStatus(box,'bonus');assert.equal(status.available,false);assert.match(status.stock,/0 \/ 8/);assert.match(status.reason,/Нет зарядов/);
+  const c=normalizeConfig({capacitySeconds:100,refillSeconds:40});
+  assert.deepEqual(refillAmount(c,90),{gain:10,waste:30});assert.match(refillHint(c,90,'Масло'),/\+0 м 10 с; избыток 0 м 30 с потеряется/);
 });

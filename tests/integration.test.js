@@ -472,6 +472,21 @@ test('refill from a linked token updates the token actually holding the tank',as
   env.now += 2000; await env.action('off'); assert.equal(env.remaining(),78);
 });
 
+test('refilling reports the actual gain and loss, and a deleted fuel rule is identified explicitly',async()=>{
+  env.lamp.flags[NS].light.remainingSeconds=90;
+  const result=await env.action('refill');assert.equal(env.remaining(),100);assert.equal(env.oil.system.quantity,1);
+  assert.match(result,/\+0 м 10 с; избыток 0 м 30 с потерян/);
+  Object.assign(env.lamp.flags[NS].light,{remainingSeconds:50,refillResource:'deleted'});
+  assert.equal(await env.action('refill'),null);assert.match(env.notices.at(-1),/Удалено правило топлива/);assert.equal(env.oil.system.quantity,1);
+});
+
+test('disabling a burning tank settles the last seconds instead of returning unsaved fuel',async()=>{
+  await env.action('on');env.now+=3250;env.lamp.flags[NS].light.enabled=false;
+  await env.fire('updateItem',env.lamp,{flags:{[NS]:{light:{enabled:false}}}});
+  await new Promise(resolve=>setTimeout(resolve,0));
+  assert.equal(env.active(),null);assert.equal(env.remaining(),96.75);
+});
+
 test('a burning tank refills from its frozen recipe while edits apply on the next ignition',async () => {
   const battery=makeItem(env.actor,'BATTERY',{enabled:false},2,'Батарейка');
   await env.action('on');env.now+=60000;await env.tick();
@@ -789,6 +804,18 @@ test('quick toggle reuses the last source and preserves a candle stub',async()=>
   await env.api.api.quickToggle(env.token); assert.equal(env.active(),null);
   await env.api.api.quickToggle(env.token);
   assert.equal(env.active().itemId,'CANDLE'); assert.equal(env.active().remainingSeconds,97);
+});
+
+test('quick toggle prefers the last usable source over an unrelated stub, while that stub keeps priority in its stack',async()=>{
+  const candle=makeItem(env.actor,'CANDLE',{mode:'disposable'},2);
+  await env.action('on','CANDLE');await env.action('off');await env.action('on');await env.action('off');
+  await env.api.api.quickToggle(env.token);assert.equal(env.active().itemId,'LAMP');await env.action('off');
+  await env.api.api.quickToggle(env.token,'CANDLE');assert.equal(env.active().itemId,'CANDLE');assert.equal(candle.system.quantity,1);
+});
+
+test('quick toggle skips an empty last tank and uses another available light',async()=>{
+  await env.action('on');await env.action('off');env.lamp.flags[NS].light.remainingSeconds=0;
+  makeItem(env.actor,'BACKUP',{mode:'infinite'});await env.api.api.quickToggle(env.token);assert.equal(env.active().itemId,'BACKUP');
 });
 
 test('low-fuel warning is private, once per threshold crossing and rearmed by refill',async()=>{

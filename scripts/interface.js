@@ -1,7 +1,15 @@
-import {normalizeConfig,normalizeIgniter} from './logic.js';
+import {normalizeConfig,normalizeIgniter,igniterStatus,refillHint} from './logic.js';
 import {defaultCatalog,normalizeCatalog,lines} from './presets.js';
 import {renderPanel,renderItemEditor,renderLibrary,readConfig,readIgniter,clockTime} from './views.js';
 import {panelUpdateKind} from './runtime.js';
+
+/** Disabled fields are irrelevant; invalid advanced fields must be revealed before focusing them. */
+function validateForm(form) {
+  if(!form)return true;
+  const invalid=form.querySelector('input:invalid,select:invalid,textarea:invalid');
+  for(let node=invalid?.parentElement;node && node!==form;node=node.parentElement)if(node.tagName==='DETAILS')node.open=true;
+  return form.reportValidity();
+}
 
 /** Foundry windows share the same renderers as the standalone visual preview. */
 export function createInterface(services) {
@@ -51,8 +59,9 @@ export function createInterface(services) {
         form.addEventListener('submit',e=>{e.preventDefault();void this.run('save');});
         const updateSections=()=>{
           const value=name=>form.elements.namedItem(name)?.value;
-          const show={tank:value('mode')==='tank',source:!!form.elements.namedItem('enabled')?.checked,refillName:!value('refillResource')};
+          const show={tank:value('mode')==='tank',finite:value('mode')!=='infinite',source:!!form.elements.namedItem('enabled')?.checked,refillName:!value('refillResource')};
           for(const section of form.querySelectorAll('[data-lk-show]')) section.hidden=!show[section.dataset.lkShow];
+          for(const control of form.querySelectorAll('input,select,textarea'))control.disabled=!!control.closest('[data-lk-show][hidden]');
         };
         form.addEventListener('change',updateSections);updateSections();
       });
@@ -140,7 +149,7 @@ export function createInterface(services) {
       const refill=this.element.querySelector('[data-lk-current-refill]');
       if(refill && refill.dataset.hasFuel==='true') {
         refill.disabled=active.remainingSeconds>=active.config.capacitySeconds;
-        refill.title=refill.disabled?'Бак полный':refill.dataset.refillHint;
+        refill.title=refill.disabled?'Бак полный':refillHint(active.config,active.remainingSeconds,refill.dataset.refillFuel);
       }
     }
     _onClose(options) {
@@ -153,8 +162,8 @@ export function createInterface(services) {
     /** Route panel actions through the authoritative inventory queue. */
     async perform(action,id) {
       if (action==='library') { await openLibrary(); return; }
-      if (action==='configure-selected') {await openItem(this.token?.actor?.items.get(this.element.querySelector('[name="configureItem"]')?.value));return;}
-      if (action==='configure') { await openItem(this.token?.actor?.items.get(id)); return; }
+      if (action==='configure-selected') {await openItem(this.token?.actor?.items.get(this.element.querySelector('[name="configureItem"]')?.value),this.token);return;}
+      if (action==='configure') { await openItem(this.token?.actor?.items.get(id),this.token); return; }
       if (!this.token) throw new Error('Выберите токен персонажа.');
       if (action==='ignite') await services.action(this.token,'switch',id,{ignitionId:this.ignitionId??'auto'});
       else if (action==='adjust') await services.action(this.token,'adjust','',{deltaSeconds:Number(id)});
@@ -165,22 +174,46 @@ export function createInterface(services) {
   class ItemEditor extends Window {
     static DEFAULT_OPTIONS = {window:{title:'Настройка предмета'},position:{width:560,height:650}};
     /** Snapshot editable Item configuration; the running instance remains independent. */
-    constructor(item) {
+    constructor(item,token) {
       super({id:`fbl-lightkeeper-item-${item.uuid ?? item.id}`}); this.item=item;
       const identified = services.identify(item); this.config=identified.config; this.origin=identified.origin;
       this.igniter=services.identifyIgniter(item);
+      this.context=services.itemContext?.(item,token)??'';
     }
-    async _renderHTML() { return `<form class="lk-item-form" autocomplete="off">${renderItemEditor(this.item,this.config,services.catalog(),this.origin,this.igniter)}</form>`; }
+    async _renderHTML() { return `<form class="lk-item-form" autocomplete="off">${renderItemEditor(this.item,this.config,services.catalog(),this.origin,this.igniter,this.context)}</form>`; }
     _replaceHTML(html,content) {
       super._replaceHTML(html,content);
       content.querySelector('[name="remainingMinutes"]')?.addEventListener('input',event=>{
         // Clearing an optional field means keeping current fuel, not restoring the opening snapshot.
         this.remainingEdited=event.target.value.trim()!=='';
       });
+      const quantity=content.querySelector('[name="quantity"]');
+      if(quantity && this.quantityEdited)quantity.value=this.quantityDraft;
+      quantity?.addEventListener('input',event=>{this.quantityEdited=event.target.value.trim()!=='';this.quantityDraft=event.target.value;this.updateStock({refreshQuantity:false});});
+      content.querySelector('form')?.addEventListener('change',()=>this.updateStock({refreshQuantity:false}));this.updateStock();
+    }
+    /** Keep live stock and inherited policy readable without replacing unsaved form values. */
+    updateStock({refreshQuantity=true}={}) {
+      const form=this.form,node=this.element?.querySelector('[data-lk-igniter-stock]');
+      if(!form || !node)return;
+      const policy=services.identifyIgniter(this.item),inherited=policy.preset?.ignition.mode??'none';
+      const quantity=form.elements.namedItem('quantity');
+      if(quantity && refreshQuantity && !this.quantityEdited && quantity!==document.activeElement)quantity.value=this.item.system.quantity;
+      const stack=this.element.querySelector('[data-lk-stack-warning]');
+      if(stack)stack.hidden=!(form.elements.namedItem('enabled')?.checked && form.elements.namedItem('mode')?.value==='tank' && Number(quantity?.value)>1);
+      const picker=form.elements.namedItem('igniterMode'),mode=picker.value==='inherit'?inherited:picker.value;
+      const inheritOption=[...picker.options].find(option=>option.value==='inherit');
+      if(inheritOption)inheritOption.textContent='По библиотеке · '+(policy.preset?.label??'нет правила');
+      const status=igniterStatus(this.item,mode);
+      node.textContent=mode==='none'?(form.elements.namedItem('canIgnite')?.checked?'Не используется как инструмент; передаёт огонь только когда горит.':'Не используется как инструмент розжига.'):
+        status.stock+(status.reason?' · '+status.reason:'')+(mode==='bonus'?' · Заряды меняются в листе предмета.':'');
     }
     get form() { return this.element?.querySelector('form'); }
     /** Validate the Item form and save either an Item snapshot or a reusable template. */
     async perform(action) {
+      if(action==='open-sheet') {
+        const sheet=this.item.sheet;if(!sheet?.render)throw new Error('Лист предмета недоступен.');await sheet.render(true);return;
+      }
       if (action==='load-preset') {
         const ignition=readIgniter(this.form);
         this.igniter={...this.igniter,config:ignition??this.igniter.config,origin:ignition?'item':'recognized'};
@@ -191,15 +224,18 @@ export function createInterface(services) {
         this.remainingEdited=true;
         await this.render({force:true}); return;
       }
-      if (!this.form.reportValidity()) return;
+      if (!validateForm(this.form)) return;
       this.config=readConfig(this.form,this.config,{item:true});
-      if (action==='save') { await services.saveItem(this.item,this.config,{remainingEdited:this.remainingEdited,ignition:readIgniter(this.form)}); await this.close(); }
+      if (action==='save') {
+        const quantity=this.quantityEdited?Number(this.form.elements.namedItem('quantity').value):undefined;
+        await services.saveItem(this.item,this.config,{remainingEdited:this.remainingEdited && !this.form.elements.namedItem('remainingMinutes')?.disabled,ignition:readIgniter(this.form),quantity});await this.close();
+      }
       else if (action==='save-template') {
         const catalog = services.catalog(); const id=foundry.utils.randomID();
         catalog.sources.push({id,label:this.item.name,icon:'lantern',names:[this.item.name],uuids:[],itemTypes:[],matchMode:'exact',
           config:{...this.config,enabled:true,templateId:id,remainingSeconds:this.config.capacitySeconds}});
         await services.saveCatalog(catalog); await openLibrary(id);
-        services.info('Шаблон добавлен. В библиотеке можно изменить название и распознавание.');
+        services.info('Шаблон создан. Изменения предмета сохраните отдельно.');
       }
     }
     _onClose(options) { editors.delete(this.item.uuid ?? this.item.id); super._onClose(options); }
@@ -217,8 +253,16 @@ export function createInterface(services) {
       super._replaceHTML(html,content);
       content.querySelector('form')?.addEventListener('input',() => {
         this.dirty=true; const state=this.element.querySelector('.lk-save-state'); if(state) state.textContent='Не сохранено';
+        this.updateRecognition();
       });
+      this.updateRecognition();
       content.querySelector('[data-lk-import]')?.addEventListener('change',e => { void this.importFile(e.target.files[0]).catch(showError); });
+    }
+    updateRecognition() {
+      const form=this.element?.querySelector('form'),node=this.element?.querySelector('[data-lk-recognition]');
+      if(!form || !node)return;
+      const automatic=lines(form.elements.namedItem('names')?.value).length || lines(form.elements.namedItem('uuids')?.value).length;
+      node.hidden=!!automatic;node.textContent=automatic?'':'Без названий или UUID — только ручное применение шаблона.';
     }
     /** Retain the current form in the draft before selecting, importing or saving entries. */
     snapshot() {
@@ -234,6 +278,7 @@ export function createInterface(services) {
     /** Merge JSON by ID and repair selection so an initially empty section remains saveable. */
     async importFile(file) {
       if (!file) return;
+      if(!validateForm(this.element?.querySelector('form')))return;
       const raw=JSON.parse(await file.text());
       if (![1,2].includes(raw.version) || !Array.isArray(raw.sources) || !Array.isArray(raw.resources)) throw new Error('Ожидается экспорт библиотеки Lightkeeper версии 1 или 2.');
       const incoming=normalizeCatalog(raw); this.snapshot();
@@ -248,6 +293,7 @@ export function createInterface(services) {
     }
     /** Apply library actions to the draft; persist only after explicit save. */
     async perform(action,id) {
+      if(action!=='delete' && !validateForm(this.element?.querySelector('form')))return;
       this.snapshot();
       const entries=this.draft[this.kind]; const index=entries.findIndex(e=>e.id===this.selectedId);
       if (action==='select') this.selectedId=id;
@@ -263,7 +309,7 @@ export function createInterface(services) {
         if(next>=0 && next<entries.length) { [entries[index],entries[next]]=[entries[next],entries[index]]; this.dirty=true; }
       } else if(action==='save') {
         const form=this.element.querySelector('form');
-        if (form && !form.reportValidity()) return;
+        if (!validateForm(form)) return;
         this.draft=normalizeCatalog(this.draft); await services.saveCatalog(this.draft); this.dirty=false;
         services.info('Библиотека света сохранена.');
       } else if(action==='defaults') {
@@ -281,26 +327,36 @@ export function createInterface(services) {
   async function openLibrary(id) {
     if (!services.isGM()) return services.warning('Библиотеку настраивает ГМ.');
     if (!library || !library.rendered) library=new PresetLibrary();
+    else if(!id){library.bringToFront();return library;}
     if (id) {
-      library.snapshot();
       const added=services.catalog().sources.find(s=>s.id===id);
       if(added && !library.draft.sources.some(s=>s.id===id)) library.draft.sources.push(added);
+      if(!validateForm(library.element?.querySelector('form'))){library.bringToFront();return library;}
+      library.snapshot();
       library.kind='sources'; library.selectedId=id;
     }
     await library.render({force:true}); library.bringToFront(); return library;
   }
   /** Reuse one editor per document UUID and bring it forward after rendering. */
-  async function openItem(item) {
+  async function openItem(item,token) {
     if (!services.isGM()) return services.warning('Настройки предмета меняет ГМ.');
     if (!item || item.documentName!=='Item') return services.warning('Выберите предмет.');
     const key=item.uuid ?? item.id;
-    let editor=editors.get(key); if (!editor) { editor=new ItemEditor(item); editors.set(key,editor); }
+    let editor=editors.get(key);
+    if(editor?.rendered){editor.updateStock();editor.bringToFront();return editor;}
+    if (!editor) { editor=new ItemEditor(item,token); editors.set(key,editor); }
     await editor.render({force:true}); editor.bringToFront(); return editor;
   }
   return {Menu:PresetLibrary,openLibrary,openItem,
     async open(token) { panel ??= new LightPanel(); panel.setToken(token); await panel.render({force:true}); document.addEventListener?.('visibilitychange',onVisibility); panel.bringToFront(); return panel; },
     /** Filter events by document relevance and update clock-only diffs without rebuilding DOM. */
     refresh(event) {
+      if(!event || event.type==='item')for(const editor of editors.values()) {
+        if(editor.rendered && (!event || (editor.item.uuid??editor.item.id)===(event.document.uuid??event.document.id))) {
+          if(event?.deleted){void editor.close();services.info('Предмет израсходован или удалён; его редактор закрыт.');}
+          else editor.updateStock();
+        }
+      }
       if(!panel?.rendered) return;
       const selected=panel.token ?? {id:panel.tokenId,parent:{id:panel.sceneId}};
       const kind=panelUpdateKind(event,selected);

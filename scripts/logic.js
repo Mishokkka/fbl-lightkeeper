@@ -88,6 +88,25 @@ export function getResourceStock(item,unit='quantity') {
   const value=Number(item?.system?.bonus?.value);
   return Number.isFinite(value) && value>=0?value:0;
 }
+/** The same live stock is shown in the picker/editor and checked before consumption. */
+export function igniterStatus(item,mode) {
+  const quantity=getQuantity(item),charges=getResourceStock(item,'bonus');
+  const rawMax=item?.system?.bonus?.max,max=Number(rawMax);
+  const maximum=rawMax!==null && rawMax!==undefined && rawMax!=='' && Number.isFinite(max) && max>=0?max:null;
+  const stock=mode==='bonus'?`Bonus ${charges}${maximum===null?'':' / '+maximum}`:`Запас ×${quantity}`;
+  const reason=mode==='none'?'Предмет не используется для розжига':quantity<1?`Нет целого предмета «${item.name}»`:
+    mode==='bonus' && charges<1?`Нет зарядов Bonus: «${item.name}»`:'';
+  return {stock,reason,available:!reason};
+}
+/** Refilling spends a whole unit; expose both the actual gain and the discarded excess. */
+export function refillAmount(config,remaining) {
+  const gain=Math.max(0,Math.min(config.refillSeconds,config.capacitySeconds-remaining));
+  return {gain,waste:Math.max(0,config.refillSeconds-gain)};
+}
+export function refillHint(config,remaining,fuelName) {
+  const {gain,waste}=refillAmount(config,remaining);
+  return `1 шт. ${fuelName} → +${displayTime(gain)}${waste>0.001?`; избыток ${displayTime(waste)} потеряется`:''}`;
+}
 /** Legacy exact-name lookup requiring at least one whole resource unit. */
 export function findNamedItem(actor, name, exceptId = '') {
   if (!name?.trim()) return null;

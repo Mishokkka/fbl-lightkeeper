@@ -40,7 +40,7 @@ try {
   await panel.locator('.lk-burn-copy h3').filter({hasText:'Свеча'}).waitFor();
   assert.equal(await page.evaluate(()=>demo.actor.items.get('MATCH').system.quantity),beforeMatches,'a neighbour supplies fire while the receiver has no burning source');
   await page.evaluate(()=>demo.donor.update({x:500}));
-  await page.waitForFunction(()=>document.querySelector('[name="ignitionChoice"]').selectedOptions[0].textContent==='Выбранный розжиг недоступен');
+  await page.waitForFunction(()=>document.querySelector('[name="ignitionChoice"]').selectedOptions[0].textContent==='Выбранный огонь вне радиуса розжига');
   await panel.locator('[name="ignitionChoice"]').selectOption('auto');
   await panel.getByRole('button',{name:'Шаблоны',exact:true}).click();
   const library=page.locator('#fbl-lightkeeper-library');
@@ -99,7 +99,7 @@ try {
   await panel.locator('.lk-source-row').filter({has:page.getByRole('heading',{name:'Карманный фонарик',exact:true})}).getByRole('button',{name:'Настроить',exact:true}).click();
   const editor=page.locator('[id="fbl-lightkeeper-item-Actor.A1.Item.FLASH"]');
   await editor.locator('[name="templateChoice"]').selectOption('hooded-lantern');
-  await editor.getByRole('button',{name:'Применить',exact:true}).click();
+  await editor.getByRole('button',{name:'Заполнить',exact:true}).click();
   await editor.locator('[name="shutter"]:checked').waitFor();
   assert.equal(await editor.locator('[name="requiresIgnition"]').isChecked(),true);
   assert.equal(await editor.locator('[name="canIgnite"]').isChecked(),true);

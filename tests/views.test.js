@@ -49,3 +49,17 @@ test('explicit zero still empties fuel or disables a threshold and a missing fie
   const config=readConfig(form,base,{item:true});
   assert.equal(config.remainingSeconds,0);assert.equal(config.lowFuelSeconds,0);assert.equal(config.capacitySeconds,2400);
 });
+
+test('disabled irrelevant settings preserve their saved values instead of hidden invalid drafts',()=>{
+  const base=normalizeConfig({capacitySeconds:2400,remainingSeconds:500,refillSeconds:1200,lowFuelSeconds:120,shutter:true,requiresIgnition:true});
+  const values={capacityMinutes:'-1',remainingMinutes:'-1',refillMinutes:'-1',lowFuelMinutes:'-1',shutter:false,requiresIgnition:false};
+  const form={elements:{namedItem:name=>name==='enabled'?{checked:false}:name in values?{value:values[name],checked:false,disabled:true}:null}};
+  const c=readConfig(form,base,{item:true});
+  for(const field of ['capacitySeconds','remainingSeconds','refillSeconds','lowFuelSeconds','shutter','requiresIgnition'])assert.equal(c[field],base[field],field);
+  assert.equal(c.enabled,false);
+});
+
+test('an unselected token is distinguished from an empty inventory or an extinguished source',()=>{
+  const html=renderPanel({hasActor:false,sources:[],canOperate:false,authority:true,gm:true});
+  assert.match(html,/Выберите на сцене токен персонажа/);assert.doesNotMatch(html,/Свет погашен|Добавьте свечу/);
+});

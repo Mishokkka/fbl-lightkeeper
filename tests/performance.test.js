@@ -166,6 +166,7 @@ test('the panel uses the active recipe even after the Item changes to another mo
     await token.update({'flags.fbl-lightkeeper.active.config.refillItem':'Топливо'});
     env.actors[0].items[1].name='Топливо';
     await item.update({'flags.fbl-lightkeeper.light.mode':'infinite','flags.fbl-lightkeeper.light.refillItem':'Другой запас'});
+    env.advance(1000);
     const panel=await env.api.open(token);
     assert.match(panel.html,/data-action="refill"/);assert.match(panel.html,/1 шт\. Топливо/);
   } finally {await env.close();}
