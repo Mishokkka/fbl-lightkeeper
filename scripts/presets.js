@@ -1,4 +1,4 @@
-import {normalizeConfig,getQuantity,getResourceStock} from './logic.js';
+import {normalizeConfig,normalizeIgniter,legacyIgniterMode,getQuantity,getResourceStock} from './logic.js';
 
 export const ICONS = Object.freeze({candle:'fa-fire-flame-simple',lamp:'fa-fire-burner',
   lantern:'fa-lightbulb',flashlight:'fa-bolt',magic:'fa-wand-sparkles',fuel:'fa-droplet',
@@ -28,11 +28,27 @@ export function normalizeCatalog(raw = {}) {
       if (seen.has(id)) throw new Error(`Повторяется ID шаблона: ${id}`);
       seen.add(id);
       return {id,label:text(v.label) || 'Без названия',icon:Object.hasOwn(ICONS,v.icon) ? v.icon : (source ? 'lantern' : 'fuel'),
-        ...rules(v),...(source ? {config:normalizeConfig({...v.config,enabled:true,templateId:id})} : {})};
+        ...rules(v),...(source ? {config:normalizeConfig({...v.config,enabled:true,templateId:id})} :
+          {ignition:normalizeIgniter(v.ignition ?? {mode:legacyResourceMode(v,raw)})})};
     });
   };
-  return {version:1,sources:unique(raw?.sources,true),resources:unique(raw?.resources,false)};
+  return {version:2,sources:unique(raw?.sources,true),resources:unique(raw?.resources,false)};
 }
+/** Missing v1 resource policies are inferred once; conflicting old uses become reusable. */
+function legacyResourceMode(resource,catalog) {
+  if(catalog?.version>=2) return 'none';
+  const modes=legacyResourceModes(resource,catalog);
+  return modes.size>1?'reusable':modes.values().next().value ?? (resource.id==='matches'?'quantity':'none');
+}
+function legacyResourceModes(resource,catalog) {
+  const modes=new Set((catalog?.sources??[]).filter(source=>{
+    const c=source.config;
+    return c?.ignitionResource?c.ignitionResource===resource.id:
+      !!c?.ignitionItem && matchesItem({name:c.ignitionItem,type:resource.itemTypes?.[0]},rules(resource));
+  }).map(source=>legacyIgniterMode(source.config)).filter(Boolean));
+  return modes;
+}
+export const legacyResourceConflicts = catalog => (catalog?.resources??[]).filter(r=>!r.ignition && legacyResourceModes(r,catalog).size>1).map(r=>r.label??r.id);
 /** Reference matching implementation: type constraints apply to both UUIDs and aliases. */
 export function matchesItem(item, rule) {
   if (rule.itemTypes.length && !rule.itemTypes.includes(item.type)) return false;
@@ -67,7 +83,7 @@ export class PresetIndex {
     this.catalog=normalizeCatalog(raw);
     this.sourcesById=new Map(this.catalog.sources.map(entry=>[entry.id,entry]));
     this.resourcesById=new Map(this.catalog.resources.map(entry=>[entry.id,entry]));
-    this.rules=new WeakMap(); this.items=new WeakMap(); this.recognized=new WeakMap();
+    this.rules=new WeakMap(); this.items=new WeakMap(); this.recognized=new WeakMap();this.ignitionRecognized=new WeakMap();
     for(const entry of [...this.catalog.sources,...this.catalog.resources]) {
       const names=entry.names.map(nameKey);
       this.rules.set(entry,{names:new Set(names),namesList:names,uuids:new Set(entry.uuids),types:new Set(entry.itemTypes),contains:entry.matchMode==='contains'});
@@ -101,6 +117,15 @@ export class PresetIndex {
     return cached.preset?{config:{...cached.preset.config},origin:'recognized',preset:cached.preset}
       :{config:normalizeConfig(),origin:'none',preset:null};
   }
+  /** Item overrides win; stock is evaluated by the caller, never cached with recognition. */
+  igniter(item) {
+    const key=this.itemKey(item);let cached=this.ignitionRecognized.get(item);
+    if(!cached || cached.key!==key){cached={key,preset:this.catalog.resources.find(entry=>this.matches(item,entry))??null};this.ignitionRecognized.set(item,cached);}
+    const preset=cached.preset;
+    const own=item.getFlag?.('fbl-lightkeeper','ignition');
+    if(own && typeof own==='object') return {config:normalizeIgniter(own),origin:'item',preset:preset??null};
+    return {config:normalizeIgniter(preset?.ignition),origin:preset?'recognized':'none',preset:preset??null};
+  }
   /** Quantities are read fresh, so consumption never relies on a cached stock count. */
   findResource(actor,key,fallbackName,exceptId='',unit='quantity') {
     const resource=this.resourcesById.get(key), name=key?'':nameKey(fallbackName);
@@ -114,16 +139,17 @@ export class PresetIndex {
 export function defaultCatalog() {
   const source = (id,label,icon,names,config) => ({id,label,icon,names,config:{enabled:true,...config}});
   return normalizeCatalog({sources:[
-    source('candle','Свеча','candle',['Свеча','Candle'],{mode:'disposable',capacitySeconds:1800,bright:1,dim:3,ignitionMode:'consume',ignitionResource:'matches',lowFuelSeconds:120}),
-    source('candle-stub','Огарок свечи','candle',['Огарок свечи'],{mode:'disposable',capacitySeconds:600,bright:1,dim:2,ignitionMode:'consume',ignitionResource:'matches'}),
-    source('torch','Факел','candle',['Факел','Torch'],{mode:'disposable',capacitySeconds:3600,bright:4,dim:8,ignitionMode:'consume',ignitionResource:'matches'}),
-    source('oil-lamp','Масляная лампа','lamp',['Масляная лампа','Oil Lamp'],{mode:'tank',capacitySeconds:2400,bright:3,dim:5,refillResource:'oil',refillSeconds:1200,ignitionMode:'consume',ignitionResource:'matches'}),
-    source('hooded-lantern','Фонарь со шторками','lantern',['Фонарь со шторками','Hooded Lantern'],{mode:'tank',capacitySeconds:2400,bright:4,dim:6,shutter:true,refillResource:'oil',refillSeconds:1200,ignitionMode:'consume',ignitionResource:'matches'}),
+    source('candle','Свеча','candle',['Свеча','Candle'],{mode:'disposable',capacitySeconds:1800,bright:1,dim:3,requiresIgnition:true,canIgnite:true,lowFuelSeconds:120}),
+    source('candle-stub','Огарок свечи','candle',['Огарок свечи'],{mode:'disposable',capacitySeconds:600,bright:1,dim:2,requiresIgnition:true,canIgnite:true}),
+    source('torch','Факел','candle',['Факел','Torch'],{mode:'disposable',capacitySeconds:3600,bright:4,dim:8,requiresIgnition:true,canIgnite:true}),
+    source('oil-lamp','Масляная лампа','lamp',['Масляная лампа','Oil Lamp'],{mode:'tank',capacitySeconds:2400,bright:3,dim:5,refillResource:'oil',refillSeconds:1200,requiresIgnition:true,canIgnite:true}),
+    source('hooded-lantern','Фонарь со шторками','lantern',['Фонарь со шторками','Hooded Lantern'],{mode:'tank',capacitySeconds:2400,bright:4,dim:6,shutter:true,refillResource:'oil',refillSeconds:1200,requiresIgnition:true,canIgnite:true}),
     source('flashlight','Карманный фонарик','flashlight',['Карманный фонарик','Фонарик','Flashlight'],{mode:'tank',capacitySeconds:900,bright:3,dim:6,angle:75,color:'#dbe9ff',animation:'none',refillResource:'battery',refillSeconds:900}),
     source('powerful-flashlight','Мощный фонарик','flashlight',['Мощный фонарик'],{mode:'tank',capacitySeconds:600,bright:6,dim:10,angle:50,color:'#edf3ff',animation:'none',refillResource:'battery',refillSeconds:600}),
     source('magic','Магический свет','magic',['Магический свет'],{mode:'infinite',bright:3,dim:6,color:'#9ad7d1',animation:'pulse'})
-  ],resources:[
-    {id:'matches',label:'Спички',icon:'matches',names:['Спички','Спичка','Коробок спичек','Matches','Match','Matchbox']},
+  ],version:2,resources:[
+    {id:'matches',label:'Спички',icon:'matches',names:['Спички','Спичка','Коробок спичек','Matches','Match','Matchbox'],ignition:{mode:'quantity'}},
+    {id:'flint',label:'Огниво',icon:'matches',names:['Огниво','Кремень','Flint and Steel','Tinderbox'],ignition:{mode:'reusable'}},
     {id:'oil',label:'Ламповое масло',icon:'fuel',names:['Ламповое масло','Масло','Lamp Oil']},
     {id:'battery',label:'Батарейки',icon:'battery',names:['Батарейка','Батарейки','Battery','Batteries']}
   ]});

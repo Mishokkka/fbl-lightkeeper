@@ -13,7 +13,8 @@ function apply(target,changes) {
   for(const [path,value] of Object.entries(changes)) {
     const keys=path.split('.'); let node=target;
     for(const key of keys.slice(0,-1)) node=node[key]??={};
-    merge(node,{[keys.at(-1)]:value});
+    if(keys.at(-1).startsWith('-='))delete node[keys.at(-1).slice(2)];
+    else merge(node,{[keys.at(-1)]:value});
   }
 }
 const listeners=new Map();
@@ -64,16 +65,16 @@ const settings=new Map(); const settingsConfig=new Map();
 const gm={id:'GM',isGM:true,active:true,flags:{},getFlag};
 const actor={id:'A1',uuid:'Actor.A1',name:'Элиас Блэквуд',items:collection(),testUserPermission:()=>true};
 /** Create a preview-only embedded Item and emit real module hook callbacks on changes. */
-function item(id,name,quantity=1) {
-  const doc={id,uuid:'Actor.A1.Item.'+id,parent:actor,type:'gear',documentName:'Item',name,system:{quantity},flags:{},getFlag,
+function item(id,name,quantity=1,owner=actor) {
+  const doc={id,uuid:owner.uuid+'.Item.'+id,parent:owner,type:'gear',documentName:'Item',name,system:{quantity},flags:{},getFlag,
     async update(changes) { apply(this,changes); await fire('updateItem',this,changes); return this; },
     async setFlag(ns,key,value) { return this.update({['flags.'+ns+'.'+key]:value}); },
-    async delete() {actor.items.splice(actor.items.indexOf(this),1);await fire('deleteItem',this);return this;}};
-  actor.items.push(doc); return doc;
+    async delete() {owner.items.splice(owner.items.indexOf(this),1);await fire('deleteItem',this);return this;}};
+  owner.items.push(doc); return doc;
 }
 const lamp=item('LAMP','Фонарь со шторками'); item('CANDLE','Свеча',3); item('FLASH','Карманный фонарик'); item('MATCH','Спички',8); item('OIL','Ламповое масло',2); item('BAT','Батарейка',2);
-const scene={id:'SCENE',tokens:collection()};
-const token={id:'TOKEN',name:actor.name,actor,parent:scene,flags:{},getFlag,
+const scene={id:'SCENE',tokens:collection(),grid:{size:100,distance:5},walls:collection()};
+const token={id:'TOKEN',name:actor.name,actor,parent:scene,x:0,y:0,width:1,height:1,elevation:0,flags:{},getFlag,
   light:{toObject:()=>({bright:0,dim:0,angle:360,negative:false,luminosity:.5,darkness:{min:0,max:1},animation:{type:null,speed:5,intensity:5}})},
   async update(changes) { apply(this,changes); await fire('updateToken',this,changes); return this; }};
 scene.tokens.push(token);
@@ -96,4 +97,9 @@ document.querySelector('#demo-light').onclick=()=>{
   for(const app of document.querySelectorAll('.fbl-lk-window')) {app.classList.toggle('theme-light',light);app.classList.toggle('theme-dark',!light);}
 };
 document.querySelector('#demo-pause').onclick=async()=>{game.paused=!game.paused;await fire('pauseGame',game.paused);};
-globalThis.demo={api:module.api,token,actor,fire};
+globalThis.demo={api:module.api,token,actor,fire,async addDonor(){
+  const other={id:'A2',uuid:'Actor.A2',name:'Анна',items:collection(),testUserPermission:()=>true};
+  item('FIRE','Свеча',1,other);
+  const donor={...token,id:'OTHER',name:other.name,actor:other,x:100,flags:{},light:{toObject:()=>({bright:0,dim:0})}};
+  scene.tokens.push(donor);await module.api.requestAction(donor,'on','FIRE');return donor;
+}};

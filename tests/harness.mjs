@@ -83,7 +83,7 @@ export async function harness({active=6,inactive=4000,inventory=100,client='GM',
   globalThis.ChatMessage={create:async()=>{}};globalThis.Item={createDocuments:async data=>data};
   await import(moduleUrl.href+'?harness='+ ++serial);await fire('init');await fire('ready');
   if(openPanel && tokens[0]) await mod.api.open({document:tokens[0],actor:actors[0]});
-  return {stats,records,intervals,callbacks,tokens,actors,scenes,users,api:mod.api,fire,reset,
+  return {stats,records,intervals,callbacks,tokens,actors,scenes,users,api:mod.api,fire,reset,apply,
     advance(ms){now+=ms;},
     async tick(){await [...intervals.values()].find(timer=>timer.ms===5000)?.fn();},
     async pause(value){game.paused=value;await fire('pauseGame',value);},

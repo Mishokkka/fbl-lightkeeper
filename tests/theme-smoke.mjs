@@ -12,8 +12,15 @@ try {
   const page=await browser.newPage({viewport:{width:2200,height:1100},deviceScaleFactor:1});
   const errors=[];page.on('pageerror',error=>errors.push(error.message));
   await page.goto(arg('url')??'http://127.0.0.1:4173/?foundry=1&system=1');
-  assert.equal((await page.request.get('http://127.0.0.1:4173/core/css/foundry2.css')).ok(),true,'Pass --foundry-public to the preview server');
-  assert.equal((await page.request.get('http://127.0.0.1:4173/system/forbidden-lands.css')).ok(),true,'Pass --system-public to the preview server');
+  assert.equal((await page.request.get(new URL('/core/css/foundry2.css',page.url()).href)).ok(),true,'Pass --foundry-public to the preview server');
+  assert.equal((await page.request.get(new URL('/system/forbidden-lands.css',page.url()).href)).ok(),true,'Pass --system-public to the preview server');
+  const requiredStyles=['/core/css/foundry2.css','/system/forbidden-lands.css'].map(p=>new URL(p,page.url()).href);
+  const appliedStyles=await page.evaluate(urls=>urls.map(href=>{
+    const sheet=[...document.styleSheets].find(sheet=>sheet.href===href);
+    return {href,applied:!!sheet && !sheet.disabled && sheet.cssRules.length>0 &&
+      (!sheet.media.length || matchMedia(sheet.media.mediaText).matches)};
+  }),requiredStyles);
+  for(const sheet of appliedStyles)assert.equal(sheet.applied,true,`The page must load and enable ${sheet.href}; use ?foundry=1&system=1`);
   await page.locator('#fbl-lightkeeper-panel [data-lk-clock]').waitFor();
   await page.evaluate(async()=>{
     await demo.api.library();await demo.api.configure(demo.actor.items.get('FLASH'));

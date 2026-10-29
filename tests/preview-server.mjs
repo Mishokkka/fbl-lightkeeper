@@ -6,6 +6,8 @@ import {fileURLToPath} from 'node:url';
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const core=process.argv.find(arg=>arg.startsWith('--foundry-public='))?.slice('--foundry-public='.length);
 const system=process.argv.find(arg=>arg.startsWith('--system-public='))?.slice('--system-public='.length);
+const port=Number(process.argv.find(arg=>arg.startsWith('--port='))?.slice('--port='.length)??4173);
+if(!Number.isInteger(port) || port<1 || port>65535)throw new Error('Invalid preview port');
 const mime={'.html':'text/html','.js':'text/javascript','.mjs':'text/javascript','.css':'text/css','.woff2':'font/woff2','.woff':'font/woff','.ttf':'font/ttf','.svg':'image/svg+xml','.webp':'image/webp','.jpg':'image/jpeg','.png':'image/png'};
 http.createServer(async(req,res)=>{
   try {
@@ -19,4 +21,4 @@ http.createServer(async(req,res)=>{
     if(!target.startsWith(base+path.sep)) throw Error('Outside preview root');
     const content=await fs.readFile(target); res.writeHead(200,{'Content-Type':mime[path.extname(target)]??'text/plain','Cache-Control':'no-store'});res.end(content);
   } catch { res.writeHead(404);res.end('Not found'); }
-}).listen(4173,'127.0.0.1',()=>console.log('Lightkeeper preview: http://127.0.0.1:4173'));
+}).listen(port,'127.0.0.1',()=>console.log(`Lightkeeper preview: http://127.0.0.1:${port}`));

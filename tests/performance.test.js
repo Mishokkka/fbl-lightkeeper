@@ -24,6 +24,29 @@ test('closed player clients never start background intervals or write timers',as
   }
 });
 
+test('six Multilevel transfers follow the open panel and keep one lean heartbeat without old holders',async()=>{
+  const env=await harness({openPanel:true});const NS='fbl-lightkeeper';
+  try {
+    const panel=await env.api.open(env.tokens[0]);panel.ignitionId='flame:'+env.tokens[0].id;
+    const moved=[];
+    for(const [i,source] of env.tokens.entries()) {
+      const flags=structuredClone(source.flags),scene=env.scenes[10+i];
+      source.parent.tokens.splice(source.parent.tokens.indexOf(source),1);
+      await env.fire('deleteToken',source,{mlt_bypass:true});
+      const token={...source,id:'MOVED'+i,uuid:`Scene.${scene.id}.Token.MOVED${i}`,parent:scene,flags,
+        updateSource(changes){env.apply(this,changes);}};
+      await env.fire('preCreateToken',token,{}, {mlt_bypass:true});scene.tokens.push(token);
+      await env.fire('createToken',token,{mlt_bypass:true});moved.push(token);
+    }
+    await new Promise(resolve=>setTimeout(resolve,70));assert.equal(panel.token,moved[0]);assert.equal(panel.ignitionId,'auto');
+    assert.equal(env.intervals.size,2,'one GM heartbeat and the existing open-panel clock');
+    env.reset();env.advance(5000);await env.tick();
+    assert.equal(env.stats.tokenWrites,6);assert.equal(env.stats.itemWrites,6);assert.ok(env.stats.payloadBytes<2000);
+    for(const key of ['inactiveReads','inactiveActorReads','sceneScans','tokenScans','sheetRenders','panelRenders'])assert.equal(env.stats[key],0,key);
+    assert.ok(env.records.filter(record=>record.type==='token').every(record=>record.id.startsWith('MOVED')));
+  }finally{await env.close();}
+});
+
 test('each of six clients on separate scenes receives an authenticated GM sound once',async()=>{
   for(const client of ['P1','P2','P3','P4','P5','P6']) {
     const env=await harness({client,active:0,inactive:0});let played=0;
@@ -72,6 +95,28 @@ test('removing a token or source cancels only its timer, including while paused'
     // The invalidation runs in the existing per-inventory queue.
     await new Promise(resolve=>setTimeout(resolve,0));assert.equal(env.tokens[1].getFlag('fbl-lightkeeper','active'),null);
   } finally {await env.close();}
+});
+
+test('shared fire updates on nearby donor movement, without scanning inactive tokens or polling clients',async()=>{
+  const env=await harness({openPanel:true});
+  try {
+    const target=env.tokens[0],donor=env.tokens[1],scene=target.parent;
+    donor.parent.tokens.splice(donor.parent.tokens.indexOf(donor),1);donor.parent=scene;scene.tokens.push(donor);
+    scene.grid={size:100,distance:5};Object.assign(target,{x:0,y:0,width:1,height:1});Object.assign(donor,{x:100,y:0,width:1,height:1});
+    donor.flags['fbl-lightkeeper'].active.config.canIgnite=true;
+    await env.fire('updateToken',donor,{flags:{'fbl-lightkeeper':{active:{config:{canIgnite:true}}}}});
+    await new Promise(resolve=>setTimeout(resolve,70));env.reset();
+    assert.ok(env.api.getIgnitionOptions(target).some(c=>c.id==='flame:'+donor.id));
+    const inactive=scene.tokens.find(t=>t.id.startsWith('OFF'));
+    for(let i=0;i<50;i++)await env.fire('updateToken',inactive,{x:i,y:i});
+    await new Promise(resolve=>setTimeout(resolve,70));assert.equal(env.stats.panelRenders,0);
+    donor.x=500;
+    for(let i=0;i<50;i++)await env.fire('updateToken',donor,{x:donor.x});
+    await new Promise(resolve=>setTimeout(resolve,70));assert.equal(env.stats.panelRenders,1);
+    assert.ok(!env.api.getIgnitionOptions(target).some(c=>c.id==='flame:'+donor.id));
+    for(const key of ['inactiveReads','inactiveActorReads','sceneScans','tokenScans'])assert.equal(env.stats[key],0,key);
+    assert.equal(env.intervals.size,2,'only the existing GM heartbeat and open-panel clock');
+  }finally{await env.close();}
 });
 
 test('item sheet headers have no module configuration button',async()=>{
@@ -144,6 +189,7 @@ test('the panel uses the active recipe even after the Item changes to another mo
     await token.update({'flags.fbl-lightkeeper.active.config.refillItem':'Топливо'});
     env.actors[0].items[1].name='Топливо';
     await item.update({'flags.fbl-lightkeeper.light.mode':'infinite','flags.fbl-lightkeeper.light.refillItem':'Другой запас'});
+    env.advance(1000);
     const panel=await env.api.open(token);
     assert.match(panel.html,/data-action="refill"/);assert.match(panel.html,/1 шт\. Топливо/);
   } finally {await env.close();}

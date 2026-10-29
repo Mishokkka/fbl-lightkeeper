@@ -1,7 +1,16 @@
 /** Pure, browser-independent rules for the Lightkeeper module. */
 export const MODULE_ID = 'fbl-lightkeeper';
 export const MODES = Object.freeze(['infinite', 'tank', 'disposable']);
-export const IGNITION = Object.freeze(['self', 'require', 'consume']);
+export const IGNITER_MODES = Object.freeze(['none','reusable','quantity','bonus']);
+/** An igniter owns its consumption policy, independently of the object it lights. */
+export function normalizeIgniter(raw={}) {
+  return {mode:IGNITER_MODES.includes(raw?.mode)?raw.mode:'none'};
+}
+/** Used only to translate the pre-0.4 source-owned policy during migration. */
+export function legacyIgniterMode(raw) {
+  return raw?.ignitionMode==='require'?'reusable':raw?.ignitionMode==='consume'?(raw.ignitionCost==='bonus'?'bonus':'quantity'):null;
+}
+export const canPassFire = raw => typeof raw?.canIgnite==='boolean'?raw.canIgnite:!!legacyIgniterMode(raw);
 /** Use defaults for missing numbers; retain explicit zero and clamp finite numeric values. */
 const limit = (value, min, max, fallback) => {
   if(value===null || value===undefined || (typeof value==='string' && value.trim()==='')) return fallback;
@@ -12,7 +21,6 @@ const limit = (value, min, max, fallback) => {
 export function normalizeConfig(raw = {}) {
   raw = raw && typeof raw === 'object' ? raw : {};
   const mode = MODES.includes(raw.mode) ? raw.mode : 'tank';
-  const ignitionMode = IGNITION.includes(raw.ignitionMode) ? raw.ignitionMode : 'self';
   const capacitySeconds = Math.round(limit(raw.capacitySeconds, 1, 604800, 1800));
   const remaining = raw.remainingSeconds === null || raw.remainingSeconds === undefined
     ? capacitySeconds : limit(raw.remainingSeconds, 0, 604800, capacitySeconds);
@@ -23,10 +31,8 @@ export function normalizeConfig(raw = {}) {
     remainingSeconds: Math.min(remaining, capacitySeconds),
     refillItem: String(raw.refillItem ?? '').trim().slice(0, 120),
     refillSeconds: Math.round(limit(raw.refillSeconds, 1, 604800, 900)),
-    ignitionMode,
-    ignitionCost: raw.ignitionCost==='bonus'?'bonus':'quantity',
-    ignitionItem: String(raw.ignitionItem ?? '').trim().slice(0, 120),
-    ignitionResource: String(raw.ignitionResource ?? '').trim().slice(0,64),
+    requiresIgnition: typeof raw.requiresIgnition==='boolean'?raw.requiresIgnition:!!legacyIgniterMode(raw),
+    canIgnite: canPassFire(raw),
     refillResource: String(raw.refillResource ?? '').trim().slice(0,64),
     templateId: String(raw.templateId ?? '').trim().slice(0,64),
     shutter: !!raw.shutter,
@@ -81,6 +87,25 @@ export function getResourceStock(item,unit='quantity') {
   if(unit!=='bonus') return getQuantity(item);
   const value=Number(item?.system?.bonus?.value);
   return Number.isFinite(value) && value>=0?value:0;
+}
+/** The same live stock is shown in the picker/editor and checked before consumption. */
+export function igniterStatus(item,mode) {
+  const quantity=getQuantity(item),charges=getResourceStock(item,'bonus');
+  const rawMax=item?.system?.bonus?.max,max=Number(rawMax);
+  const maximum=rawMax!==null && rawMax!==undefined && rawMax!=='' && Number.isFinite(max) && max>=0?max:null;
+  const stock=mode==='bonus'?`Bonus ${charges}${maximum===null?'':' / '+maximum}`:`Запас ×${quantity}`;
+  const reason=mode==='none'?'Предмет не используется для розжига':quantity<1?`Нет целого предмета «${item.name}»`:
+    mode==='bonus' && charges<1?`Нет зарядов Bonus: «${item.name}»`:'';
+  return {stock,reason,available:!reason};
+}
+/** Refilling spends a whole unit; expose both the actual gain and the discarded excess. */
+export function refillAmount(config,remaining) {
+  const gain=Math.max(0,Math.min(config.refillSeconds,config.capacitySeconds-remaining));
+  return {gain,waste:Math.max(0,config.refillSeconds-gain)};
+}
+export function refillHint(config,remaining,fuelName) {
+  const {gain,waste}=refillAmount(config,remaining);
+  return `1 шт. ${fuelName} → +${displayTime(gain)}${waste>0.001?`; избыток ${displayTime(waste)} потеряется`:''}`;
 }
 /** Legacy exact-name lookup requiring at least one whole resource unit. */
 export function findNamedItem(actor, name, exceptId = '') {

@@ -6,7 +6,7 @@ const item=(name,extra={})=>({id:'X',name,type:'gear',system:{quantity:1},getFla
 test('default candle is recognized across case, whitespace and unicode variants',()=>{
   const result=identifySource(item('  СВЕЧА  '),defaultCatalog());
   assert.equal(result.origin,'recognized'); assert.equal(result.config.mode,'disposable');
-  assert.equal(result.config.ignitionResource,'matches');
+  assert.equal(result.config.requiresIgnition,true);assert.equal(result.config.canIgnite,true);assert.equal(result.config.ignitionResource,undefined);
   assert.equal(nameKey('  Зелёный   ФОНАРЬ '),'зеленый фонарь');
 });
 

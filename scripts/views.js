@@ -1,4 +1,4 @@
-import {displayTime,normalizeConfig} from './logic.js';
+import {displayTime,normalizeConfig,normalizeIgniter,getQuantity} from './logic.js';
 import {ICONS} from './presets.js';
 
 /** Escape user-controlled text for HTML text and attribute positions. */
@@ -22,7 +22,9 @@ export function button(action,label,{id='',iconName='',css='',disabled=false,tit
 export const masthead = title => `<header class="lk-masthead"><h2>${esc(title)}</h2></header>`;
 /** Render the structural light panel; ticking clocks subsequently update individual DOM nodes. */
 export function renderPanel(model) {
-  const {active,sources,gm,paused,authority,tokenName,canOperate=true} = model;
+  const {active,sources,gm,paused,authority,tokenName,canOperate=true,igniters=[],ignitionId='auto',items=[]} = model;
+  const hasActor=model.hasActor??!!tokenName;
+  const canAct=canOperate && authority,unavailable=!authority?'Нужен подключённый ГМ':!canOperate?(model.operationProblem||'Нет доступа к персонажу'):'';
   const condition = !authority ? 'Нужен ГМ' : paused ? 'Пауза' : '';
   const remaining = active?.remainingSeconds;
   const ratio = active?.config.mode === 'infinite' ? 100 : Math.max(0,Math.min(100,100*(remaining ?? 0)/(active?.config.capacitySeconds || 1)));
@@ -32,23 +34,25 @@ export function renderPanel(model) {
     <div class="lk-burn-body"><div class="lk-source-glyph">${icon(active.icon)}</div><div class="lk-burn-copy"><h3>${esc(active.itemName)}</h3><p>${active.shutterClosed?'Топливо продолжает расходоваться':esc(modeName(active.config.mode))}</p></div></div>
     <div class="lk-clock-row"><strong data-lk-clock>${clockTime(remaining)}</strong></div>
     <div class="lk-meter" role="meter" aria-label="Запас топлива" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(ratio)}"><span data-lk-meter style="width:${ratio}%"></span></div>
-    <div class="lk-actions">${active.config.shutter?button('shutter',active.shutterClosed?'Открыть шторки':'Закрыть шторки',{iconName:'lantern',disabled:!canOperate}):''}${button('off','Погасить',{iconName:'candle',css:'lk-quiet',disabled:!canOperate})}</div>
+    <div class="lk-actions">${active.config.shutter?button('shutter',active.shutterClosed?'Открыть шторки':'Закрыть шторки',{iconName:'lantern',disabled:!canAct,title:unavailable}):''}${button('off','Погасить',{iconName:'candle',css:'lk-quiet',disabled:!canAct,title:unavailable})}</div>
   </section>` : '<section class="lk-unlit"><h3>Свет погашен</h3></section>';
   const rows = sources.map(s => `<article class="lk-source-row ${s.active?'lk-selected':''}" data-lk-name="${esc(s.name.toLocaleLowerCase())}">
-    <div class="lk-row-icon">${icon(s.icon)}</div><div class="lk-row-copy"><h4>${esc(s.name)}</h4><p>${s.active?`<span data-lk-current-detail>${esc(s.timeLabel ?? s.detail)}</span>${esc(s.stockLabel ?? '')}`:esc(s.detail)}</p><small>${esc(s.ignitionLabel??'')}</small></div>
-    <div class="lk-row-actions">${button(s.active?'off':'ignite',s.active?'Погасить':active?'Заменить':'Зажечь',{id:s.id,css:s.active?'lk-quiet':'lk-primary',disabled:!canOperate || !!s.blocked,title:s.blocked || ''})}
-    ${s.refillable?button('refill','Заправить',{id:s.id,css:'lk-small lk-quiet',disabled:!canOperate || !!s.refillBlocked,title:s.refillBlocked || s.refillHint,
-      data:s.active && canOperate?{'lk-current-refill':'','has-fuel':!s.fuelMissing,'refill-hint':s.refillHint}: {}}):''}
+    <div class="lk-row-icon">${icon(s.icon)}</div><div class="lk-row-copy"><h4>${esc(s.name)}</h4><p>${s.active?`<span data-lk-current-detail>${esc(s.timeLabel ?? s.detail)}</span>${esc(s.stockLabel ?? '')}`:esc(s.detail)}</p>${s.blocked?`<small class="lk-block-reason">${esc(s.blocked)}</small>`:s.refillable && s.refillBlocked && s.refillBlocked!=='Бак полный'?`<small class="lk-block-reason">${esc(s.refillBlocked)}</small>`:''}</div>
+    <div class="lk-row-actions">${button(s.active?'off':'ignite',s.active?'Погасить':active?'Заменить':'Зажечь',{id:s.id,css:s.active?'lk-quiet':'lk-primary',disabled:!canAct || !!s.blocked,title:unavailable || s.blocked || ''})}
+    ${s.refillable?button('refill','Заправить',{id:s.id,css:'lk-small lk-quiet',disabled:!canAct || !!s.refillBlocked,title:unavailable || s.refillBlocked || s.refillHint,
+      data:s.active && canAct?{'lk-current-refill':'','has-fuel':!s.fuelMissing,'refill-fuel':s.refillFuel}: {}}):''}
     ${gm && s.configurable!==false?button('configure','Настроить',{id:s.id,css:'lk-small lk-link lk-icon-button',iconName:'settings'}):''}</div></article>`).join('');
   return `<div class="lk-panel">
     ${masthead(tokenName || 'Выберите токен')}
     ${condition?`<div class="lk-session"><span class="lk-dot lk-paused"></span>${esc(condition)}</div>`:''}
-    ${!canOperate?'<p class="lk-notice">Этот персонаж недоступен для управления. Выберите свой токен.</p>':''}
-    ${hero}
+    ${!canOperate && hasActor?`<p class="lk-notice">${esc(model.operationProblem||'Выберите свой токен персонажа.')}</p>`:''}
+    ${hasActor?hero:''}
+    ${sources.some(s=>s.requiresIgnition)?`<div class="lk-ignition-choice">${select('ignitionChoice','Розжиг',ignitionId,[['auto','Авто · '+(igniters.find(i=>i.available)?.label??'нет доступного')],...igniters.map(i=>[i.id,i.label,!i.available]),...(!['auto',...igniters.map(i=>i.id)].includes(ignitionId)?[[ignitionId,model.ignitionProblem||'Выбранный розжиг недоступен',true]]:[])])}</div>`:''}
     <div class="lk-section-heading">${gm?button('library','Шаблоны',{css:'lk-small lk-link',iconName:'magic'}):''}</div>
     <label class="lk-search"><i class="fa-solid fa-magnifying-glass" aria-hidden="true"></i><input type="search" data-lk-search placeholder="Найти источник…" aria-label="Найти источник" value="${esc(model.search ?? '')}"></label>
-    <div class="lk-sources">${rows || '<div class="lk-empty">Источников пока нет.<br>Добавьте свечу или лампу в инвентарь — настроенные названия распознаются автоматически.</div>'}<p class="lk-empty" data-lk-no-results hidden>Совпадений нет.</p></div>
-    ${gm && active && active.config.mode!=='infinite'?`<div class="lk-gm-tools">${button('adjust','−5 мин',{id:'-300',css:'lk-small lk-quiet'})}${button('adjust','+5 мин',{id:'300',css:'lk-small lk-quiet'})}</div>`:''}
+    <div class="lk-sources">${rows || (hasActor?'<div class="lk-empty">Источников пока нет.<br>Добавьте свечу или лампу в инвентарь — настроенные названия распознаются автоматически.</div>':'<div class="lk-empty">Выберите на сцене токен персонажа, чтобы увидеть его источники света.</div>')}<p class="lk-empty" data-lk-no-results hidden>Совпадений нет.</p></div>
+    ${gm && active && active.config.mode!=='infinite'?`<div class="lk-gm-tools">${button('adjust','−5 мин',{id:'-300',css:'lk-small lk-quiet',disabled:!canAct,title:unavailable})}${button('adjust','+5 мин',{id:'300',css:'lk-small lk-quiet',disabled:!canAct,title:unavailable})}</div>`:''}
+    ${gm && items.length?`<details class="lk-details lk-inventory-config"><summary>Настроить предмет</summary><div class="lk-actions">${select('configureItem','Предмет',items[0].id,items.map(i=>[i.id,i.name]))}${button('configure-selected','Открыть',{css:'lk-small',iconName:'settings'})}</div></details>`:''}
   </div>`;
 }
 
@@ -58,7 +62,7 @@ function field(name,label,value,{type='text',hint='',min='',max='',step='',list=
 }
 /** Render escaped select options while preserving explicit empty-resource choices. */
 function select(name,label,value,choices,hint='') {
-  return `<label class="lk-field"><span>${esc(label)}</span><select name="${esc(name)}">${choices.map(([id,label])=>`<option value="${esc(id)}" ${id===value?'selected':''}>${esc(label)}</option>`).join('')}</select>${hint?`<small>${esc(hint)}</small>`:''}</label>`;
+  return `<label class="lk-field"><span>${esc(label)}</span><select name="${esc(name)}">${choices.map(([id,label,disabled])=>`<option value="${esc(id)}" ${id===value?'selected':''} ${disabled?'disabled':''} title="${esc(label)}">${esc(label)}</option>`).join('')}</select>${hint?`<small>${esc(hint)}</small>`:''}</label>`;
 }
 /** Render a boolean setting with an optional explanatory hint. */
 function check(name,label,value,hint='') {
@@ -76,10 +80,10 @@ export function configFields(c,catalog,{item=false} = {}) {
   const when=(key,content)=>`<div class="lk-conditional" data-lk-show="${key}">${content}</div>`;
   return `<fieldset class="lk-fieldset"><legend>Горение</legend><div class="lk-grid">
     ${select('mode','Тип источника',c.mode,[['disposable','Свеча / факел'],['tank','Бак / заряд'],['infinite','Без расхода']])}
-    ${field('capacityMinutes','Полный запас, мин',c.capacitySeconds/60,{type:'number',min:1/60,max:10080,step:'any'})}
-    ${item?field('remainingMinutes','Осталось, мин',c.remainingSeconds/60,{type:'number',min:0,max:10080,step:'any'}):''}
-    ${field('lowFuelMinutes','Предупредить за, мин',c.lowFuelSeconds/60,{type:'number',min:0,max:10080,step:'any',hint:'0 — без предупреждения'})}
-    </div>${check('shutter','Шторки',c.shutter)}</fieldset>
+    ${when('finite',field('capacityMinutes','Полный запас, мин',c.capacitySeconds/60,{type:'number',min:1/60,max:10080,step:'any'}))}
+    ${item?when('finite',field('remainingMinutes','Осталось, мин',c.remainingSeconds/60,{type:'number',min:0,max:10080,step:'any'})):''}
+    ${when('finite',field('lowFuelMinutes','Предупредить за, мин',c.lowFuelSeconds/60,{type:'number',min:0,max:10080,step:'any',hint:'0 — без предупреждения'}))}
+    </div>${check('requiresIgnition','Нужен розжиг',c.requiresIgnition)}${check('canIgnite','Может разжигать другие источники',c.canIgnite)}${check('shutter','Шторки',c.shutter)}</fieldset>
     <details class="lk-details lk-config-section"><summary>Свет</summary><fieldset class="lk-fieldset"><legend>Параметры света</legend><div class="lk-grid">
     ${field('bright','Яркий радиус',c.bright,{type:'number',min:0,max:200,step:'any'})}${field('dim','Тусклый радиус',c.dim,{type:'number',min:0,max:200,step:'any'})}
     ${field('angle','Угол луча, °',c.angle,{type:'number',min:1,max:360,step:'any'})}${field('color','Цвет света',c.color,{type:'color'})}
@@ -87,12 +91,6 @@ export function configFields(c,catalog,{item=false} = {}) {
     ${select('animation','Анимация',c.animation,[['none','Без анимации'],['torch','Факел'],['flame','Пламя'],['pulse','Пульсация'],['chroma','Смена цвета']])}
     ${field('animationSpeed','Скорость анимации',c.animationSpeed,{type:'number',min:1,max:10,step:'1'})}${field('animationIntensity','Сила анимации',c.animationIntensity,{type:'number',min:1,max:10,step:'1'})}
     </div></fieldset></details>
-    <fieldset class="lk-fieldset"><legend>Розжиг</legend><div class="lk-grid">
-    ${select('ignitionMode','Режим',c.ignitionMode,[['self','Без розжига'],['require','Нерасходуемый предмет'],['consume','Расходуемый']])}
-    ${when('ignition',select('ignitionResource','Предмет розжига',c.ignitionResource,choices(c.ignitionResource)))}
-    ${when('cost',select('ignitionCost','Списывать за розжиг',c.ignitionCost,[['quantity','1 предмет'],['bonus','1 Bonus (заряд)']]))}
-    ${when('ignition',when('ignitionName',field('ignitionItem','Точное название',c.ignitionItem)))}
-    </div></fieldset>
     <fieldset class="lk-fieldset" data-lk-show="tank"><legend>Заправка</legend><div class="lk-grid">
     ${select('refillResource','Топливо',c.refillResource,choices(c.refillResource))}
     ${when('refillName',field('refillItem','Точное название',c.refillItem))}
@@ -105,11 +103,12 @@ export function configFields(c,catalog,{item=false} = {}) {
 }
 /** Convert minutes to seconds; blank numeric fields retain existing values, explicit zero remains valid. */
 export function readConfig(form,base,{item=false} = {}) {
-  const value = name => form.elements.namedItem(name)?.value;
-  const checked = name => !!form.elements.namedItem(name)?.checked;
+  const control=name=>{const el=form.elements.namedItem(name);return el && !el.disabled?el:null;};
+  const value = name => control(name)?.value;
+  const checked = name => control(name)?!!control(name).checked:!!base?.[name];
   const raw = {...base};
   const numeric=new Set(['bright','dim','angle','alpha','animationSpeed','animationIntensity']);
-  for (const name of ['mode','bright','dim','angle','color','alpha','animation','animationSpeed','animationIntensity','ignitionMode','ignitionCost','ignitionResource','refillResource','ignitionItem','refillItem','soundOn','soundOff']) {
+  for (const name of ['mode','bright','dim','angle','color','alpha','animation','animationSpeed','animationIntensity','refillResource','refillItem','soundOn','soundOff']) {
     const input=value(name);
     if (input!==undefined && !(numeric.has(name) && String(input).trim()==='')) raw[name] = input;
   }
@@ -125,16 +124,29 @@ export function readConfig(form,base,{item=false} = {}) {
   if(volume!==undefined && String(volume).trim()!=='')raw.soundVolume=Number(volume)/100;
   if(fade!==undefined && String(fade).trim()!=='')raw.soundFadeSeconds=Number(fade);
   raw.shutter = checked('shutter');
+  for(const key of ['requiresIgnition','canIgnite'])if(control(key))raw[key]=checked(key);
   if (item) raw.enabled = checked('enabled');
   return normalizeConfig(raw);
 }
+const igniterChoices=[['none','Не используется'],['reusable','Не расходуется'],['quantity','Расход: 1 предмет'],['bonus','Расход: 1 Bonus']];
+/** Resource consumption belongs in its own editor, never in the source configuration. */
+export function readIgniter(form) {
+  const mode=form.elements.namedItem('igniterMode')?.value;
+  return mode==='inherit'?null:normalizeIgniter({mode});
+}
+function igniterField(mode,inheritLabel='') {
+  return select('igniterMode','Использование для розжига',mode,[...(inheritLabel?[['inherit',inheritLabel]]:[]),...igniterChoices]);
+}
 /** Render an individual source editor with pinned save actions. */
-export function renderItemEditor(item,c,catalog,origin) {
+export function renderItemEditor(item,c,catalog,origin,igniter={config:{mode:'none'},origin:'none'},context='') {
+  const template=catalog.sources.find(p=>p.id===c.templateId);
+  const originHint=origin==='recognized'?`По шаблону «${template?.label??item.name}»; сохранение создаст копию для предмета.`:origin==='item'?'Свои настройки предмета; изменения библиотеки не применяются автоматически.':'';
   return `<div class="lk-editor">${masthead(item.name)}
-    <div class="lk-item-scroll"><div class="lk-preset-picker">${select('templateChoice','Заполнить из шаблона',c.templateId,[['','Свои настройки'],...catalog.sources.map(s=>[s.id,s.label])])}${button('load-preset','Применить',{css:'lk-primary'})}</div>
-    ${check('enabled','Использовать как источник света',c.enabled)}${configFields(c,catalog,{item:true})}
+    <div class="lk-item-scroll">${Number.isFinite(item.system?.quantity)?`<div class="lk-inventory-stock">${field('quantity','Количество предметов',getQuantity(item),{type:'number',min:0,step:'any'})}</div>`:''}
+    ${check('enabled','Использовать как источник света',c.enabled)}<div data-lk-show="source"><div class="lk-preset-picker">${select('templateChoice','Заполнить из шаблона',c.templateId,[['','Свои настройки'],...catalog.sources.map(s=>[s.id,s.label])])}${button('load-preset','Заполнить',{css:'lk-primary'})}</div>${originHint?`<p class="lk-context">${esc(originHint)}</p>`:''}${context?`<p class="lk-context">${esc(context)}</p>`:''}<p class="lk-context" data-lk-stack-warning hidden>У стопки общий бак. Для независимых остатков разделите предметы.</p>${configFields(c,catalog,{item:true})}</div>
+    <fieldset class="lk-fieldset"><legend>Средство розжига</legend>${igniterField(igniter.origin==='item'?igniter.config.mode:'inherit','По библиотеке · '+(catalog.resources.find(r=>r.id===igniter.preset?.id)?.label??'нет правила'))}<p class="lk-hint" data-lk-igniter-stock></p>${button('open-sheet','Лист предмета',{css:'lk-small lk-link'})}</fieldset>
     </div>
-    <div class="lk-actions lk-editor-footer">${button('save','Сохранить предмет',{css:'lk-primary'})}${button('save-template','Как новый шаблон',{iconName:'magic',css:'lk-quiet'})}</div></div>`;
+    <div class="lk-actions lk-editor-footer">${button('save','Сохранить предмет',{css:'lk-primary'})}<span data-lk-show="source">${button('save-template','Создать шаблон',{iconName:'magic',css:'lk-quiet'})}</span></div></div>`;
 }
 /** Render a draft library; an empty section is valid and remains importable. */
 export function renderLibrary(catalog,kind,selectedId,{dirty=false,importInfo=''} = {}) {
@@ -144,13 +156,14 @@ export function renderLibrary(catalog,kind,selectedId,{dirty=false,importInfo=''
     <div class="lk-grid">${field('label','Название шаблона',entry.label)}${select('icon','Значок',entry.icon,Object.keys(ICONS).map(k=>[k,{candle:'Пламя',lamp:'Лампа',lantern:'Фонарь',flashlight:'Молния',magic:'Магия',fuel:'Масло',matches:'Розжиг',battery:'Батарея',settings:'Шестерёнка',folder:'Папка'}[k]]))}</div>
     <fieldset class="lk-fieldset"><legend>Распознавание предмета</legend>
       ${textarea('names','Названия и варианты',entry.names,'Один вариант в строке. Регистр, «ё» и лишние пробелы не важны.')}
+      <p class="lk-hint" data-lk-recognition></p>
       <div class="lk-grid">${select('matchMode','Сопоставление названия',entry.matchMode,[['exact','Точное совпадение'],['contains','Название содержит вариант']])}${field('itemTypes','Типы Item через запятую',entry.itemTypes.join(', '),{hint:'Пусто — все типы; например gear, weapon'})}</div>
       <details class="lk-details"><summary>Устойчивые ссылки на предметы</summary>${textarea('uuids','UUID / исходный UUID из компендиума',entry.uuids,'Такие совпадения работают и после переименования.')}</details>
     </fieldset>
-    ${kind==='sources'?configFields(entry.config,catalog):''}
+    ${kind==='sources'?configFields(entry.config,catalog):`<fieldset class="lk-fieldset"><legend>Средство розжига</legend>${igniterField(entry.ignition?.mode??'none')}</fieldset>`}
     </form>` : '<div class="lk-empty">Создайте шаблон или добавьте стандартные.</div>';
   return `<div class="lk-library">
     <div class="lk-library-toolbar"><nav class="lk-tabs" aria-label="Раздел библиотеки">${button('kind','Источники',{id:'sources',css:kind==='sources'?'lk-tab-active':''})}${button('kind','Розжиг и топливо',{id:'resources',css:kind==='resources'?'lk-tab-active':''})}</nav>${button('new','Новый',{css:'lk-primary'})}</div>
-    <div class="lk-library-body"><aside class="lk-library-list">${entries.map(e=>`<button type="button" data-action="select" data-id="${esc(e.id)}" class="lk-template-choice ${e.id===selectedId?'lk-selected':''}">${icon(e.icon)}<span>${esc(e.label)}</span></button>`).join('')}${entry?`<div class="lk-actions">${button('up','Выше',{css:'lk-small lk-quiet'})}${button('down','Ниже',{css:'lk-small lk-quiet'})}</div>`:''}</aside><section class="lk-library-editor">${editor}</section></div>
-    <footer class="lk-library-footer"><div class="lk-actions">${button('save','Сохранить библиотеку',{css:'lk-primary'})}<span class="lk-save-state">${dirty?'Не сохранено':''}</span></div><div class="lk-actions">${button('defaults','Стандартные',{css:'lk-small lk-quiet'})}${button('export','Экспорт',{css:'lk-small lk-quiet'})}${button('import','Импорт',{css:'lk-small lk-quiet'})}<input type="file" data-lk-import accept="application/json,.json" hidden></div>${importInfo?`<p class="lk-hint">${esc(importInfo)}</p>`:''}</footer></div>`;
+    <div class="lk-library-body"><aside class="lk-library-list">${entries.map(e=>`<button type="button" data-action="select" data-id="${esc(e.id)}" class="lk-template-choice ${e.id===selectedId?'lk-selected':''}">${icon(e.icon)}<span>${esc(e.label)}</span></button>`).join('')}${entry?`<div class="lk-actions">${button('up','Выше',{css:'lk-small lk-quiet',disabled:entries[0]===entry})}${button('down','Ниже',{css:'lk-small lk-quiet',disabled:entries.at(-1)===entry})}</div>`:''}</aside><section class="lk-library-editor">${editor}</section></div>
+    <footer class="lk-library-footer"><div class="lk-actions">${button('save','Сохранить библиотеку',{css:'lk-primary'})}<span class="lk-save-state">${dirty?'Не сохранено':''}</span></div><div class="lk-actions">${button('defaults','Стандартные',{css:'lk-small lk-quiet',title:'Добавить недостающие стандартные шаблоны, сохраняя ваши изменения'})}${button('export','Экспорт',{css:'lk-small lk-quiet',title:'Экспортировать текущий черновик'})}${button('import','Импорт',{css:'lk-small lk-quiet'})}<input type="file" data-lk-import accept="application/json,.json" hidden></div>${importInfo?`<p class="lk-hint">${esc(importInfo)}</p>`:''}</footer></div>`;
 }
