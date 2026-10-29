@@ -364,6 +364,7 @@ export function createInterface(services) {
       else if(kind==='render') scheduleRefresh();
     },
     follow(token) { if(panel?.rendered) { panel.setToken(token); scheduleRefresh(); } },
+    relocate(from,token) {if(panel?.rendered && `${panel.sceneId}:${panel.tokenId}`===from){panel.setToken(token);scheduleRefresh();}},
     clock() { panel?.updateClock(); },
     /** Cancel owned timers and visibility listeners before closing all module windows. */
     async close() {

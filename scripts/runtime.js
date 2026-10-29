@@ -2,6 +2,8 @@ import {MODULE_ID,canPassFire} from './logic.js';
 
 /** Scene-qualified keys also work for test doubles and unlinked tokens. */
 export const tokenKey = token => `${token.parent?.id ?? ''}:${token.id}`;
+/** Multilevel's stoken marks a visual projection, never an independent inventory or flame. */
+export const isMultilevelProjection = token => Object.hasOwn(token?.flags?.['multilevel-tokens']??{},'stoken');
 
 /** Event-maintained active set: inactive actors are never resolved by the heartbeat. */
 export class ActiveSourceIndex {
@@ -10,7 +12,7 @@ export class ActiveSourceIndex {
   /** Read only flags first; resolve actor identity only for an active source. */
   sync(token) {
     const state=token.getFlag(MODULE_ID,'active');
-    if (!state) { this.remove(token); return; }
+    if (!state || isMultilevelProjection(token) || token.flags?.[MODULE_ID]?.transfer) { this.remove(token); return; }
     const key=tokenKey(token), finite=state.config.mode!=='infinite',flame=canPassFire(state.config);
     const tank=state.config.mode==='tank'?JSON.stringify([this.actorKey(token),state.itemId]):null;
     const old=this.entries.get(key);

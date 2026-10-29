@@ -1,7 +1,8 @@
 import { MODULE_ID as NS, normalizeConfig, normalizeIgniter, lightData, tickRemaining, displayTime, getQuantity, getResourceStock, igniterStatus, refillAmount, refillHint, makeRuntime } from './logic.js';
 import {defaultCatalog,normalizeCatalog,PresetIndex,legacyResourceConflicts} from './presets.js';
 import {createInterface} from './interface.js';
-import {ActiveSourceIndex,changedPaths,isClockUpdate,touchesPath} from './runtime.js';
+import {ActiveSourceIndex,changedPaths,isClockUpdate,touchesPath,tokenKey,isMultilevelProjection} from './runtime.js';
+import {TokenTransfers} from './transport.js';
 import {createSoundPlayer} from './audio.js';
 import {IgnitionReach,ignitionDistance,legacyIgniterAssignments} from './ignition.js';
 
@@ -16,6 +17,7 @@ const playSound=createSoundPlayer({create:src=>game.audio.create({src,singleton:
 let soundBroadcast=Promise.resolve();
 let heartbeat = null;
 let authorityId = null;
+let authorityHandled = false;
 let authoritySince = 0;
 let pauseHistory = [];
 let windows = null;
@@ -24,6 +26,7 @@ let ready = false;
 let ticking = false;
 let ignitionMigration=null;
 const activeSources=new ActiveSourceIndex(actorKey);
+const transfers=new TokenTransfers();
 const ignitionReach=new IgnitionReach();
 /** Settings hooks invalidate the compiled library on every client. UI/API callers get a copy. */
 const presets = () => presetIndex ??= new PresetIndex(game.settings.get(NS,'catalog') ?? defaultCatalog());
@@ -41,13 +44,14 @@ function isAuthority() {
   const next = leadGM()?.id ?? null;
   if (next !== authorityId) {
     authorityId = next;
+    authorityHandled = false;
     authoritySince = Date.now();
   }
   return next === game.user.id;
 }
 function getConfig(item) { return item ? identify(item).config : normalizeConfig(); }
 // getFlag returns live document data. Never mutate it before update succeeds.
-function activeState(token) { return clone(token.getFlag(NS, 'active') ?? null); }
+function activeState(token) { return isMultilevelProjection(token)?null:clone(token.getFlag(NS, 'active') ?? null); }
 /** Fence async writes to the exact document revision read before the first await. */
 function sourceVersion(token) {
   const state=token.getFlag(NS,'active');
@@ -55,11 +59,12 @@ function sourceVersion(token) {
   const values=state?keys.map(key=>state[key]):null;
   return ()=>{
     const current=token.getFlag(NS,'active');
-    return !!current && !!values && keys.every((key,i)=>Object.is(current[key],values[i]));
+    return isLiveToken(token) && !!current && !!values && keys.every((key,i)=>Object.is(current[key],values[i]));
   };
 }
 /** Read disposable remainders without mutating flags; merge the legacy single-stub format. */
 function stowedStates(token,{all=false}={}) {
+  if(!all && isMultilevelProjection(token))return [];
   const saved = clone(token.getFlag(NS, 'stowedSources') ?? []);
   const legacy = token.getFlag(NS, 'stowed');
   if (legacy && !saved.some(s => s.itemId === legacy.itemId && s.actorKey===legacy.actorKey)) saved.push(clone(legacy));
@@ -68,8 +73,9 @@ function stowedStates(token,{all=false}={}) {
 }
 function availableItems(actor) { return actor?.items.filter(i => getConfig(i).enabled && getQuantity(i) > 0) ?? []; }
 /** Respect ownership and the world player-control switch for ordinary game actions. */
-function canOperate(user, token) { return !!(user?.active && token?.actor && (user.isGM || (game.settings.get(NS,'allowPlayers') && token.actor.testUserPermission(user, 'OWNER')))); }
+function canOperate(user, token) { return !!(user?.active && isLiveToken(token) && !isMultilevelProjection(token) && !token.getFlag(NS,'transfer') && token.actor && (user.isGM || (game.settings.get(NS,'allowPlayers') && token.actor.testUserPermission(user, 'OWNER')))); }
 function resolveToken(sceneId, tokenId) { return game.scenes.get(sceneId)?.tokens.get(tokenId) ?? null; }
+const isLiveToken = token => !!token && resolveToken(token.parent?.id,token.id)===token;
 /** Distinguish a shared linked inventory from each synthetic unlinked inventory. */
 function actorKey(token) {
   return token.actor?.uuid ?? (token.actorLink === false
@@ -141,6 +147,7 @@ async function saveRemaining(item,remaining) {
   if(!await item.update({[`flags.${NS}.light.remainingSeconds`]:remaining},{render:false})) throw new Error(`Сохранение «${item.name}» отменено.`);
 }
 async function updateToken(token, changes, options={}) {
+  if(token.getFlag(NS,'carrier')!==tokenKey(token) && !isClockUpdate(changes))changes={...changes,[`flags.${NS}.carrier`]:tokenKey(token)};
   if (!await token.update(changes,options)) throw new Error('Изменение света токена отменено.');
   activeSources.sync(token); updateHeartbeat();
 }
@@ -194,6 +201,7 @@ async function turnOff(token, runtime, {expired = false, discard = false,valid=s
 
 /** Commit elapsed real seconds. Called exclusively by the elected GM. */
 async function settle(token) {
+  if(!isLiveToken(token) || token.getFlag(NS,'transfer') || isMultilevelProjection(token))return false;
   const valid=sourceVersion(token);
   const runtime = activeState(token);
   if (!runtime) return false;
@@ -273,7 +281,7 @@ function fuelProblem(config,fuel) {
 const igniterModeLabel = mode => ({reusable:'не расходуется',quantity:'−1 шт.',bonus:'−1 Bonus'}[mode]??'Не используется');
 /** Only a still-burning, exposed, inventory-valid source can pass its fire to another token. */
 function flameProblem(target,donor,user) {
-  if(!donor || resolveToken(donor.parent?.id,donor.id)!==donor || target.parent?.id!==donor.parent?.id || (donor.hidden && !user.isGM)) return 'Выбранный огонь недоступен';
+  if(!donor || isMultilevelProjection(donor) || donor.getFlag(NS,'transfer') || resolveToken(donor.parent?.id,donor.id)!==donor || target?.parent?.id!==donor.parent?.id || (donor.hidden && !user.isGM)) return 'Выбранный огонь недоступен';
   const state=donor.getFlag(NS,'active');
   if(!state || (state.config.mode!=='infinite' && !(remainingAt(state)>0))) return 'Выбранный огонь погас';
   if(!normalizeConfig(state.config).canIgnite) return 'Этот источник не может передавать огонь';
@@ -603,7 +611,7 @@ function viewModel(token,ignitionId='auto') {
     if(active && !sources.some(s=>s.id===active.itemId)) sources.unshift({id:active.itemId,name:active.itemName,icon:active.icon ?? 'candle',active:true,requiresIgnition:active.config.requiresIgnition,detail:displayTime(active.remainingSeconds),originLabel:'Горящий экземпляр',configurable:!!token.actor.items.get(active.itemId),refillable:false});
   }
   return {tokenName:token?.name,active,sources,gm:game.user.isGM,paused:game.paused,authority:!!leadGM(),canOperate:canOperate(game.user,token),ignitionId,
-    hasActor:!!token?.actor,operationProblem:!token?.actor?'Выберите токен персонажа':!game.user.isGM && !game.settings.get(NS,'allowPlayers')?'ГМ отключил управление светом для игроков':'Нет доступа к этому персонажу',
+    hasActor:!!token?.actor,operationProblem:isMultilevelProjection(token)?'Проекция Multilevel Tokens. Управляйте светом исходного токена.':token?.getFlag(NS,'transfer')?'Перенос источника между сценами…':!token?.actor?'Выберите токен персонажа':!game.user.isGM && !game.settings.get(NS,'allowPlayers')?'ГМ отключил управление светом для игроков':'Нет доступа к этому персонажу',
     ignitionProblem:ignitionId==='auto'?'':ignitionProblem(token,'',ignitionId,game.user,candidates),
     igniters:candidates.map(({id,label,available})=>({id,label,available})),items:game.user.isGM?(token?.actor?.items??[]).map(item=>({id:item.id,name:item.name})):[]};
 }
@@ -680,7 +688,7 @@ function updateHeartbeat() {
 /** Keep the last pause state before the oldest live timestamp; bound history on every client. */
 function prunePauseHistory() {
   if(pauseHistory.length<2) return;
-  let cutoff=Date.now();
+  let cutoff=Math.min(Date.now(),transfers.oldestAt());
   for(const token of activeSources.values()) {
     const state=token.getFlag(NS,'active');
     if(state?.config.mode!=='infinite' && Number.isFinite(state?.lastAt)) cutoff=Math.min(cutoff,state.lastAt);
@@ -724,10 +732,14 @@ async function onPause(paused) {
 }
 /** Unrelated player connections neither write documents nor reset a running clock. */
 async function resumeOnAuthorityChange() {
-  const previous=authorityId, authority=isAuthority(); updateHeartbeat();
-  if(previous===authorityId) return;
+  const authority=isAuthority(); updateHeartbeat();
+  // A view or action may detect election before the userConnected hook reaches us.
+  if(authorityHandled) return;
+  authorityHandled=true;
   windows?.refresh();
   if(!authority) return;
+  await prepareCarriers();
+  if(!isAuthority())return;
   ignitionMigration=migrateIgnitionSettings();
   try {await ignitionMigration;}
   catch(error){console.error(`[${NS}] Ошибка переноса розжига`,error);warning('Не все настройки розжига удалось перенести. Проверьте консоль; перенос повторится при следующем запуске ГМа.');}
@@ -774,9 +786,10 @@ async function migrateIgnitionSettings() {
 function onTokenUpdate(token,changes) {
   const wasIgniter=activeSources.igniters.has(token);
   const paths=changedPaths(changes);
-  if(touchesPath(paths,`flags.${NS}.active`) || ['actorId','actorLink','delta'].some(key=>touchesPath(paths,key))) {
+  if(touchesPath(paths,`flags.${NS}.active`) || touchesPath(paths,`flags.${NS}.transfer`) || touchesPath(paths,'flags.multilevel-tokens.stoken') || ['actorId','actorLink','delta'].some(key=>touchesPath(paths,key))) {
     activeSources.sync(token); updateHeartbeat(); prunePauseHistory();
   }
+  if(touchesPath(paths,`flags.${NS}.transfer`) && !token.getFlag(NS,'transfer'))transfers.complete(tokenKey(token));
   const identityChange=paths.some(path=>['actorId','actorLink'].includes(path)) ||
     (!isClockUpdate(changes) && touchesPath(paths,`flags.${NS}.active`));
   if(identityChange && isAuthority()) {
@@ -796,6 +809,81 @@ function onItemUpdate(item,changes={},options={}) {
     const state=token.getFlag(NS,'active');
     if(state.itemId!==item.id || token.actor?.uuid!==item.parent?.uuid || isDisposable(state)) continue;
     void withLock(token,()=>settle(token)).catch(error=>console.error('['+NS+'] Ошибка инвентаря',error));
+  }
+}
+
+/** Keep the latest committed state, not MLT's possibly older snapshot queued before deletion. */
+function onTokenDelete(token,options={}) {
+  const flags=token.flags?.[NS];
+  if(options.mlt_bypass && !isMultilevelProjection(token) && flags?.carrier) {
+    transfers.remember(flags.carrier,{flags:clone(flags),light:previousLight(token),
+      actorKey:flags.transfer?.actorKey??actorKey(token),...(token.actorLink===false?{delta:clone(token.toObject().delta??{})}:{})});
+  }
+  const ignitionRelevant=activeSources.igniters.has(token);
+  activeSources.remove(token);updateHeartbeat();windows.refresh({type:'deletedToken',document:token,ignitionRelevant});
+}
+/** Pre-create documents can lack an ID. Defer synthetic actor rebinding until the server assigns it. */
+function prepareToken(token,_data,options={}) {
+  const flags=clone(token.flags?.[NS]??{}),runtime=flags.active;
+  if(isMultilevelProjection(token)) {
+    // MLT mirrors light itself. Removing its copied runtime must not extinguish the projection.
+    if(!Object.keys(flags).length)return;
+    token.updateSource({[`flags.${NS}.active`]:null,[`flags.${NS}.stowed`]:null,[`flags.${NS}.stowedSources`]:[],
+      [`flags.${NS}.carrier`]:null,[`flags.${NS}.transfer`]:null});return;
+  }
+  if(options.mlt_bypass && flags.carrier) {
+    const saved=transfers.claim(flags.carrier),carried=saved?.flags??flags;
+    const oldKey=saved?.actorKey??carried.transfer?.actorKey??carried.active?.actorKey??
+      (token.actorLink===false?`Scene.${flags.carrier.split(':')[0]}.Token.${flags.carrier.split(':')[1]}.Actor.${token.actorId}`:actorKey(token));
+    const active=carried.active,expired=active && active.config.mode!=='infinite' && remainingAt(active)<=0;
+    token.updateSource({[`flags.${NS}`]:{...carried,transfer:{from:flags.carrier,actorKey:oldKey}},
+      ...(saved?.delta?{delta:saved.delta}:{}),...(expired?{light:active.previousLight??{}}:saved?{light:saved.light}:{})});return;
+  }
+  // Ordinary copy/paste still creates a fresh token, without cloning an already spent candle.
+  if(!runtime && !stowedStates(token,{all:true}).length && !flags.carrier && !flags.transfer)return;
+  token.updateSource({...(runtime?{light:runtime.previousLight??{}}:{}),[`flags.${NS}.active`]:null,
+    [`flags.${NS}.stowed`]:null,[`flags.${NS}.stowedSources`]:[],[`flags.${NS}.carrier`]:null,[`flags.${NS}.transfer`]:null});
+}
+/** Handoff is an existing source, with no activation, ignition cost, or on/off sound. */
+async function restoreTransfer(token) {
+  const transfer=token.getFlag(NS,'transfer');
+  if(!transfer || !isAuthority() || !isLiveToken(token))return;
+  // An old inventory checkpoint can still be returning when MLT deletes its document.
+  await locks.get(transfer.actorKey)?.catch(()=>{});
+  return withLock(token,async()=>{
+    if(!isAuthority() || !isLiveToken(token) || !token.getFlag(NS,'transfer'))return;
+    const inventory=actorKey(token),rebind=state=>{
+      if(state && (!state.actorKey || state.actorKey===transfer.actorKey))state.actorKey=inventory;
+      return state;
+    };
+    const runtime=rebind(activeState(token));
+    const patch={ [`flags.${NS}.active`]:runtime,[`flags.${NS}.stowed`]:null,
+      [`flags.${NS}.stowedSources`]:stowedStates(token,{all:true}).map(rebind),[`flags.${NS}.transfer`]:null,
+      [`flags.${NS}.carrier`]:tokenKey(token) };
+    if(runtime && runtime.config.mode!=='infinite' && remainingAt(runtime)<=0)patch.light=runtime.previousLight??{};
+    await updateToken(token,patch);
+    if(runtime)await settle(token);
+    transfers.complete(tokenKey(token));
+  });
+}
+function onTokenCreate(token) {
+  const transfer=token.getFlag(NS,'transfer');
+  if(transfer){transfers.arrive(transfer.from,tokenKey(token));windows.relocate(transfer.from,token);}
+  activeSources.sync(token);updateHeartbeat();
+  windows.refresh({type:'token',document:token,ignitionRelevant:activeSources.igniters.has(token),changes:{flags:{[NS]:{active:token.getFlag(NS,'active')}}}});
+  if(transfer)return restoreTransfer(token).catch(error=>{console.error(`[${NS}] Ошибка переноса света`,error);if(isAuthority())warning('Перенос света не завершён. Перезагрузите клиент ГМа для повторной попытки.');});
+}
+/** Backfill only existing source holders once on authority acquisition, never in the heartbeat. */
+async function prepareCarriers() {
+  for(const scene of game.scenes.contents)for(const token of scene.tokens.contents) {
+    const flags=token.flags?.[NS];
+    if(!flags || isMultilevelProjection(token))continue;
+    try {
+      if(flags.transfer)await restoreTransfer(token);
+      else if((flags.active || flags.stowed || flags.stowedSources?.length) && flags.carrier!==tokenKey(token)) {
+        await withLock(token,async()=>{if(isAuthority() && isLiveToken(token))await updateToken(token,{[`flags.${NS}.carrier`]:tokenKey(token)},{render:false});});
+      }
+    }catch(error){console.error(`[${NS}] Не удалось подготовить перенос света`,token.name,error);}
   }
 }
 
@@ -856,8 +944,8 @@ Hooks.once('init',()=>{
   Hooks.on('renderActorSheet',installSheet);
   Hooks.on('controlToken',(token,controlled)=>{if(controlled) windows.follow(token);});
   Hooks.on('updateToken',onTokenUpdate);
-  Hooks.on('createToken',token=>{activeSources.sync(token);updateHeartbeat();windows.refresh({type:'token',document:token,ignitionRelevant:activeSources.igniters.has(token),changes:{flags:{[NS]:{active:token.getFlag(NS,'active')}}}});});
-  Hooks.on('deleteToken',token=>{const ignitionRelevant=activeSources.igniters.has(token);activeSources.remove(token);updateHeartbeat();windows.refresh({type:'deletedToken',document:token,ignitionRelevant});});
+  Hooks.on('createToken',onTokenCreate);
+  Hooks.on('deleteToken',onTokenDelete);
   Hooks.on('createScene',scene=>{for(const token of scene.tokens.contents) activeSources.sync(token);updateHeartbeat();});
   Hooks.on('deleteScene',scene=>{activeSources.removeScene(scene);updateHeartbeat();windows.refresh({type:'scene',document:scene});});
   Hooks.on('updateScene',(scene,changes)=>{if(changedPaths(changes).some(path=>path==='grid' || path.startsWith('grid.')))windows.refresh({type:'scene',document:scene});});
@@ -877,13 +965,7 @@ Hooks.once('init',()=>{
   });
   Hooks.on('pauseGame',onPause);
   Hooks.on('updateUser',onUserUpdate);
-  Hooks.on('preCreateToken',token=>{
-    // A pasted token must not duplicate an already consumed candle or active tank.
-    const runtime = activeState(token);
-    if (!runtime && !stowedStates(token,{all:true}).length) return;
-    token.updateSource({...(runtime ? {light:runtime.previousLight ?? {}} : {}),
-      [`flags.${NS}.active`]:null,[`flags.${NS}.stowed`]:null,[`flags.${NS}.stowedSources`]:[]});
-  });
+  Hooks.on('preCreateToken',prepareToken);
 });
 Hooks.once('ready',async()=>{
   if (game.system.id !== 'forbidden-lands') console.warn(`[${NS}] Модуль предназначен для Forbidden Lands; система: ${game.system.id}`);
@@ -910,7 +992,7 @@ Hooks.once('ready',async()=>{
 Hooks.once('shutdown',()=>{
   ready=false;
   if(heartbeat!==null)clearInterval(heartbeat);
-  heartbeat=null; activeSources.clear(); presetIndex=null;
+  heartbeat=null; activeSources.clear();transfers.clear(); presetIndex=null;
   playSound.close();
   void windows?.close();
   for (const wait of pending.values()) {

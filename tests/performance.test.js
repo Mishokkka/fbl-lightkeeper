@@ -24,6 +24,29 @@ test('closed player clients never start background intervals or write timers',as
   }
 });
 
+test('six Multilevel transfers follow the open panel and keep one lean heartbeat without old holders',async()=>{
+  const env=await harness({openPanel:true});const NS='fbl-lightkeeper';
+  try {
+    const panel=await env.api.open(env.tokens[0]);panel.ignitionId='flame:'+env.tokens[0].id;
+    const moved=[];
+    for(const [i,source] of env.tokens.entries()) {
+      const flags=structuredClone(source.flags),scene=env.scenes[10+i];
+      source.parent.tokens.splice(source.parent.tokens.indexOf(source),1);
+      await env.fire('deleteToken',source,{mlt_bypass:true});
+      const token={...source,id:'MOVED'+i,uuid:`Scene.${scene.id}.Token.MOVED${i}`,parent:scene,flags,
+        updateSource(changes){env.apply(this,changes);}};
+      await env.fire('preCreateToken',token,{}, {mlt_bypass:true});scene.tokens.push(token);
+      await env.fire('createToken',token,{mlt_bypass:true});moved.push(token);
+    }
+    await new Promise(resolve=>setTimeout(resolve,70));assert.equal(panel.token,moved[0]);assert.equal(panel.ignitionId,'auto');
+    assert.equal(env.intervals.size,2,'one GM heartbeat and the existing open-panel clock');
+    env.reset();env.advance(5000);await env.tick();
+    assert.equal(env.stats.tokenWrites,6);assert.equal(env.stats.itemWrites,6);assert.ok(env.stats.payloadBytes<2000);
+    for(const key of ['inactiveReads','inactiveActorReads','sceneScans','tokenScans','sheetRenders','panelRenders'])assert.equal(env.stats[key],0,key);
+    assert.ok(env.records.filter(record=>record.type==='token').every(record=>record.id.startsWith('MOVED')));
+  }finally{await env.close();}
+});
+
 test('each of six clients on separate scenes receives an authenticated GM sound once',async()=>{
   for(const client of ['P1','P2','P3','P4','P5','P6']) {
     const env=await harness({client,active:0,inactive:0});let played=0;

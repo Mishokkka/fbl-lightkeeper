@@ -1,5 +1,10 @@
 import {test, beforeEach, afterEach} from 'node:test';
 import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
+import {runInNewContext} from 'node:vm';
+
+// Optional local integration with the installed MLT batch implementation; no third-party code is bundled.
+const multilevelSource=process.env.LIGHTKEEPER_MULTILEVEL_SOURCE?readFileSync(process.env.LIGHTKEEPER_MULTILEVEL_SOURCE,'utf8'):null;
 
 const NS = 'fbl-lightkeeper';
 const clone = structuredClone;
@@ -61,7 +66,9 @@ function makeToken(actor,id = 'T1',scene = env.scene) {
       apply(this,update);
       return this;
     },
-    updateSource(changes) { apply(this,changes); }};
+    updateSource(changes) { if(changes.light) merge(this.currentLight,changes.light);apply(this,changes); },
+    toObject() { return {flags:clone(this.flags),light:clone(this.currentLight),actorId:actor.id,actorLink:this.actorLink!==false,
+      ...(this.delta?{delta:clone(this.delta)}:{})}; }};
   scene.tokens.push(token);
   return token;
 }
@@ -653,6 +660,148 @@ test('pasting a token cannot clone an already consumed candle',async () => {
   assert.equal(copied.getFlag(NS,'active'),null);
   assert.deepEqual(copied.getFlag(NS,'stowedSources'),[]);
   assert.equal(copied.light.bright,0); assert.ok(env.active());
+});
+
+/** Multilevel Tokens 14.1.0 deletes first, then creates without the old _id, with mlt_bypass. */
+async function multilevelMove(source,{snapshot=source.toObject(),actor=source.actor,gap=0,beforeCreate=async()=>{},afterPrepare=()=>{},pendingId=false}={}) {
+  const scene={id:'S'+(++serial),tokens:collection(),grid:env.scene.grid,walls:collection()};game.scenes.push(scene);
+  let token;
+  const remove=async options=>{
+    source.parent.tokens.splice(source.parent.tokens.indexOf(source),1);
+    await env.fire('deleteToken',source,options,env.gm.id);env.now+=gap;await beforeCreate();return [source];
+  };
+  const create=async options=>{
+    token=makeToken(actor,'MOVED'+serial,scene);token.flags=clone(snapshot.flags);token.currentLight=clone(snapshot.light);
+    token.actorLink=source.actorLink;token.delta=clone(snapshot.delta);
+    const id=token.id;if(pendingId)token.id=null;
+    await env.fire('preCreateToken',token,snapshot,options,env.gm.id);afterPrepare(token);token.id=id;
+    await env.fire('createToken',token,options,env.gm.id);return [token];
+  };
+  if(multilevelSource) {
+    const {MultilevelTokens,MltRequestBatch}=runInNewContext(multilevelSource+'\n;({MultilevelTokens,MltRequestBatch})',
+      {game,structuredClone,foundry:{data:{ShapeData:{TYPES:{}}}},Hooks:{on(){}},console:{log(){}}});
+    const batch=new MltRequestBatch();batch.deleteToken(source.parent,source.id);batch.createToken(scene,snapshot);
+    source.parent.deleteEmbeddedDocuments=async(_type,_ids,options)=>remove(options);
+    scene.createEmbeddedDocuments=async(_type,_data,options)=>create(options);
+    await MultilevelTokens.prototype._execute.call({},batch);
+  }else{await remove({mlt_bypass:true});await create({mlt_bypass:true});}
+  return token;
+}
+
+test('Multilevel teleport preserves a burning last candle, elapsed time and original light without new ignition',async()=>{
+  const candle=makeItem(env.actor,'CANDLE',{mode:'disposable',requiresIgnition:true},1);
+  const matches=makeItem(env.actor,'MATCH',{enabled:false},2,'Спички');const base=clone(env.token.currentLight);
+  await env.action('on','CANDLE');const activation=env.active().activationId;
+  assert.equal(candle.system.quantity,0);assert.equal(matches.system.quantity,1);
+  env.now+=12000;const moved=await multilevelMove(env.token,{gap:3000});
+  assert.equal(env.active(moved)?.activationId,activation);assert.equal(env.active(moved).remainingSeconds,85);
+  assert.equal(moved.currentLight.bright,4);assert.equal(matches.system.quantity,1);
+  env.now+=5000;await env.tick();assert.equal(env.active(moved).remainingSeconds,80);
+  await env.action('off','CANDLE',moved);assert.deepEqual(moved.currentLight,base);
+  assert.equal(moved.getFlag(NS,'stowedSources')[0].remainingSeconds,80);
+});
+
+test('Multilevel projections keep their copied light but never enter the fuel or shared-flame index',async()=>{
+  makeItem(env.actor,'CANDLE',{mode:'disposable',canIgnite:true},2);await env.action('on','CANDLE');
+  const projection=makeToken(env.actor,'PROJECTION');projection.flags=clone(env.token.flags);
+  projection.flags['multilevel-tokens']={stoken:env.token.id};projection.currentLight=clone(env.token.currentLight);
+  await env.fire('preCreateToken',projection,{}, {mlt_bypass:true},env.gm.id);await env.fire('createToken',projection,{mlt_bypass:true},env.gm.id);
+  assert.equal(projection.currentLight.bright,4);assert.equal(env.active(projection),null);
+  assert.ok(!env.api.api.getIgnitionOptions(env.token).some(option=>option.id==='flame:'+projection.id));
+  assert.equal(await env.action('on','CANDLE',projection),null);
+  env.now+=5000;await env.tick();assert.equal(env.active().remainingSeconds,95);
+});
+
+test('Multilevel transfers a shuttered tank and refills its new holder, including an initially missing token ID',async()=>{
+  env.lamp.flags[NS].light.shutter=true;await env.action('on');await env.action('shutter');env.now+=13000;
+  const moved=await multilevelMove(env.token,{gap:2000,pendingId:true});
+  assert.equal(env.active(moved).actorKey,env.actor.uuid);assert.equal(env.active(moved).remainingSeconds,85);
+  assert.equal(env.remaining(),85);assert.equal(env.active(moved).shutterClosed,true);assert.equal(moved.currentLight.bright,0);
+  assert.ok(await env.action('refill','LAMP',moved));assert.equal(env.remaining(),100);assert.equal(env.oil.system.quantity,1);
+  await env.action('shutter','',moved);assert.equal(moved.currentLight.bright,4);
+  env.now+=2000;await env.action('off','',moved);assert.equal(env.remaining(),98);assert.equal(moved.currentLight.bright,0);
+});
+
+test('Multilevel rebinds synthetic inventory identity and only its own candle stubs',async()=>{
+  env.actor.uuid='Scene.S1.Token.T1.Actor.A1';env.token.actorLink=false;
+  makeItem(env.actor,'CANDLE',{mode:'disposable'},2);await env.action('on','CANDLE');env.now+=10000;await env.action('off');
+  const foreign={...clone(env.token.getFlag(NS,'stowedSources')[0]),actorKey:'Actor.OTHER',remainingSeconds:30};
+  env.token.getFlag(NS,'stowedSources').push(foreign);await env.action('on');env.now+=5000;
+  const actor=makeActor('Scene.DEST.Token.NEW.Actor.A1');makeItem(actor,'LAMP');makeItem(actor,'CANDLE',{mode:'disposable'},1);
+  const moved=await multilevelMove(env.token,{actor,pendingId:true});
+  assert.equal(env.active(moved).actorKey,actor.uuid);assert.equal(env.active(moved).remainingSeconds,95);
+  const stubs=moved.getFlag(NS,'stowedSources');assert.equal(stubs[0].actorKey,actor.uuid);assert.deepEqual(stubs[1],foreign);
+  await env.action('off','LAMP',moved);await env.action('on','CANDLE',moved);
+  assert.equal(env.active(moved).remainingSeconds,90);assert.equal(actor.items.get('CANDLE').system.quantity,1);
+});
+
+test('Multilevel transfers a saved stub even after the last candle Item has been deleted',async()=>{
+  makeItem(env.actor,'CANDLE',{mode:'disposable'},1);await env.action('on','CANDLE');env.now+=10000;await env.action('off');
+  assert.equal(env.actor.items.get('CANDLE'),undefined);
+  const moved=await multilevelMove(env.token,{gap:120000});assert.equal(env.active(moved),null);
+  assert.equal(moved.getFlag(NS,'stowedSources')[0].remainingSeconds,90);
+  await env.action('on','CANDLE',moved);assert.equal(env.active(moved).remainingSeconds,90);
+});
+
+test('Multilevel uses the latest deleted state and delta instead of a stale queued snapshot',async()=>{
+  env.token.actorLink=false;env.actor.uuid='Scene.S1.Token.T1.Actor.A1';env.token.delta={items:[{_id:'CANDLE',system:{quantity:2}}]};
+  makeItem(env.actor,'CANDLE',{mode:'disposable'},2);await env.action('on','CANDLE');const snapshot=env.token.toObject();
+  env.now+=13000;await env.action('off');env.token.delta.items[0].system.quantity=1;
+  const actor=makeActor('Scene.DEST.Token.NEW.Actor.A1'),moved=await multilevelMove(env.token,{snapshot,actor});
+  assert.equal(env.active(moved),null);assert.equal(moved.currentLight.bright,0);
+  assert.equal(moved.getFlag(NS,'stowedSources')[0].remainingSeconds,87);assert.equal(moved.getFlag(NS,'stowedSources')[0].actorKey,actor.uuid);
+  assert.deepEqual(moved.delta,env.token.delta);
+});
+
+test('Multilevel excludes pauses during the deletion/create gap even without other active tokens',async()=>{
+  await env.action('on');env.now+=10000;
+  const moved=await multilevelMove(env.token,{beforeCreate:async()=>{
+    env.now+=5000;await env.pause(true);env.now+=60000;await env.pause(false);env.now+=3000;
+  }});
+  assert.equal(env.active(moved).remainingSeconds,82);assert.equal(env.remaining(),82);
+  env.now+=2000;await env.tick();assert.equal(env.active(moved).remainingSeconds,80);
+});
+
+test('a light expiring in Multilevel transit arrives extinguished without consuming more stock',async()=>{
+  const candle=makeItem(env.actor,'CANDLE',{mode:'disposable'},2);await env.action('on','CANDLE');
+  const moved=await multilevelMove(env.token,{gap:101000,afterPrepare:token=>assert.equal(token.currentLight.bright,0,'expired light must be dark before the new token is rendered')});
+  assert.equal(env.active(moved),null);assert.equal(moved.currentLight.bright,0);assert.equal(candle.system.quantity,1);
+  assert.deepEqual(moved.getFlag(NS,'stowedSources'),[]);assert.equal(env.chat.length,1);
+});
+
+test('a pending old checkpoint cannot reinsert a deleted Multilevel source or double-drain its tank',async()=>{
+  await env.action('on');env.now+=10000;const update=env.lamp.update;let release;
+  env.lamp.update=async function(changes){await new Promise(resolve=>{release=resolve;});this.update=update;return update.call(this,changes);};
+  const checkpoint=env.tick();while(!release)await Promise.resolve();
+  const movement=multilevelMove(env.token);await new Promise(resolve=>setTimeout(resolve,0));release();
+  await checkpoint;const moved=await movement;
+  assert.equal(env.active(moved).remainingSeconds,90);assert.equal(env.remaining(),90);
+  env.now+=5000;await env.tick();assert.equal(env.active(moved).remainingSeconds,85);assert.equal(env.remaining(),85);
+});
+
+test('repeated Multilevel transitions preserve one activation and only one active tank holder',async()=>{
+  await env.action('on');const activation=env.active().activationId;let token=env.token;
+  for(let i=0;i<5;i++){env.now+=3000;token=await multilevelMove(token);}
+  assert.equal(env.active(token).activationId,activation);assert.equal(env.active(token).remainingSeconds,85);assert.equal(env.remaining(),85);
+  const other=makeToken(env.actor,'OTHER');assert.equal(await env.action('on','LAMP',other),null);
+  await env.action('off','LAMP',token);assert.ok(await env.action('on','LAMP',other));assert.equal(env.active(other).remainingSeconds,85);
+});
+
+test('Multilevel pending transfer resumes on GM takeover without charging disconnected time',async()=>{
+  await env.action('on');env.now+=5000;await env.tick();
+  const moved=await multilevelMove(env.token,{beforeCreate:async()=>{env.gm.active=false;await env.fire('userConnected',env.gm,false);env.now+=60000;}});
+  assert.ok(moved.getFlag(NS,'transfer'));env.gm.active=true;
+  assert.equal(await env.action('on','LAMP',moved),null,'a client may notice the new GM before userConnected arrives');
+  await env.fire('userConnected',env.gm,true);
+  assert.equal(moved.getFlag(NS,'transfer'),null);assert.equal(env.active(moved).remainingSeconds,95);assert.equal(moved.currentLight.bright,4);
+  env.now+=3000;await env.tick();assert.equal(env.active(moved).remainingSeconds,92);
+});
+
+test('Multilevel infinite light survives transit and never acquires a finite fuel amount',async()=>{
+  makeItem(env.actor,'MAGIC',{mode:'infinite'});await env.action('on','MAGIC');
+  const moved=await multilevelMove(env.token,{gap:180000});
+  assert.equal(env.active(moved).remainingSeconds,null);assert.equal(moved.currentLight.bright,4);
+  assert.equal(moved.getFlag(NS,'transfer'),null);assert.equal(env.active(moved).actorKey,env.actor.uuid);
 });
 
 test('server-authenticated requester controls authorization, ignoring payload userId',async () => {
