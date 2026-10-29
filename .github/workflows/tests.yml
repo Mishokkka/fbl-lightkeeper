@@ -26,4 +26,5 @@ jobs:
       - run: node --check scripts/interface.js
       - run: node --check scripts/runtime.js
       - run: node --check scripts/audio.js
+      - run: node --check scripts/ignition.js
       - run: npm test

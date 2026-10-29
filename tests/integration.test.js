@@ -28,7 +28,8 @@ function apply(target, changes) {
     const parts = path.split('.');
     let node = target;
     for (const key of parts.slice(0,-1)) node = node[key] ??= {};
-    merge(node,{[parts.at(-1)]:value});
+    if(parts.at(-1).startsWith('-='))delete node[parts.at(-1).slice(2)];
+    else merge(node,{[parts.at(-1)]:value});
   }
 }
 function flag(ns,key) { return key.split('.').reduce((o,k) => o?.[k],this.flags?.[ns]); }
@@ -36,7 +37,7 @@ function flag(ns,key) { return key.split('.').reduce((o,k) => o?.[k],this.flags?
 function makeItem(actor,id,config = {},quantity = 1,name = id) {
   const item = {id,name,parent:actor,documentName:'Item',system:{quantity},
     flags:{[NS]:{light:{enabled:true,mode:'tank',capacitySeconds:100,remainingSeconds:100,
-      bright:4,dim:6,ignitionMode:'self',...config}}},getFlag:flag,
+      bright:4,dim:6,requiresIgnition:false,canIgnite:false,...config}}},getFlag:flag,
     async setFlag(ns,key,value) { apply(this,{[`flags.${ns}.${key}`]:value}); return this; },
     async update(changes) { apply(this,changes); return this; },
     async delete() {actor.items.splice(actor.items.indexOf(this),1);await env.fire('deleteItem',this);return this;}};
@@ -49,7 +50,7 @@ function makeActor(uuid = 'Actor.A1') {
 }
 /** Track source flags and light restoration with native-style nested updates. */
 function makeToken(actor,id = 'T1',scene = env.scene) {
-  const token = {id,uuid:`Scene.${scene.id}.Token.${id}`,name:'Персонаж',actor,parent:scene,
+  const token = {id,uuid:`Scene.${scene.id}.Token.${id}`,name:'Персонаж',actor,parent:scene,x:0,y:0,width:1,height:1,elevation:0,
     flags:{[NS]:{}},currentLight:{bright:0,dim:0,angle:360,color:null,alpha:0.5,
       negative:false,luminosity:0.5,darkness:{min:0,max:1},
       animation:{type:null,speed:5,intensity:5}},getFlag:flag,
@@ -89,7 +90,7 @@ beforeEach(async () => {
   env.gm = makeUser('GM1',true);
   env.player = makeUser('P1',false);
   env.users = collection([env.gm,env.player]);
-  env.scene = {id:'S1',tokens:collection()};
+  env.scene = {id:'S1',tokens:collection(),grid:{size:100,distance:5},walls:collection()};
   env.actor = makeActor();
   env.token = makeToken(env.actor);
   env.lamp = makeItem(env.actor,'LAMP',{refillItem:'Масло',refillSeconds:40});
@@ -106,7 +107,7 @@ beforeEach(async () => {
   globalThis.canvas = {tokens:{controlled:[]}};
   await import(`../scripts/module.js?test=${++serial}`);
   await env.fire('init'); await env.fire('ready');
-  env.action = (action,itemId = 'LAMP',token = env.token) => env.api.api.requestAction(token,action,itemId);
+  env.action = (action,itemId = 'LAMP',token = env.token,options={}) => env.api.api.requestAction(token,action,itemId,options);
   env.active = (token = env.token) => token.getFlag(NS,'active');
   env.remaining = () => env.lamp.getFlag(NS,'light').remainingSeconds;
   env.tick = () => env.timers[0]?.();
@@ -119,7 +120,7 @@ afterEach(async () => {
 });
 
 test('real time, ignition, pause, refill and restoration of original light',async () => {
-  Object.assign(env.lamp.flags[NS].light,{ignitionMode:'consume',ignitionItem:'Спички'});
+  Object.assign(env.lamp.flags[NS].light,{requiresIgnition:true});
   const matches = makeItem(env.actor,'MATCH',{enabled:false},2,'Спички');
   const base = clone(env.token.currentLight);
   await env.action('on');
@@ -145,8 +146,8 @@ test('a consumed last match disappears from the native inventory and a stub need
 });
 
 test('a consumable ignition Bonus spends one charge per fresh or resumed candle, keeping its Item',async()=>{
-  const candle=makeItem(env.actor,'CANDLE',{mode:'disposable',ignitionMode:'consume',ignitionItem:'Коробок',ignitionCost:'bonus'},2);
-  const box=makeItem(env.actor,'BOX',{enabled:false},1,'Коробок');box.system.bonus={value:3,max:8};
+  const candle=makeItem(env.actor,'CANDLE',{mode:'disposable',requiresIgnition:true},2);
+  const box=makeItem(env.actor,'BOX',{enabled:false},1,'Коробок');box.system.bonus={value:3,max:8};box.flags[NS].ignition={mode:'bonus'};
   await env.action('on','CANDLE');assert.equal(box.system.bonus.value,2);assert.equal(box.system.bonus.max,8);
   assert.equal(box.system.quantity,1);assert.equal(env.actor.items.get('BOX'),box);
   env.now+=1000;await env.action('off');assert.equal(box.system.bonus.value,2);
@@ -154,24 +155,24 @@ test('a consumable ignition Bonus spends one charge per fresh or resumed candle,
 });
 
 test('ignition skips empty Bonus items and never falls back to spending their quantity',async()=>{
-  makeItem(env.actor,'CANDLE',{mode:'disposable',ignitionMode:'consume',ignitionItem:'Кремень',ignitionCost:'bonus'});
-  const empty=makeItem(env.actor,'EMPTY',{enabled:false},2,'Кремень');empty.system.bonus={value:0,max:5};
-  const full=makeItem(env.actor,'FULL',{enabled:false},1,'Кремень');full.system.bonus={value:1,max:5};
+  makeItem(env.actor,'CANDLE',{mode:'disposable',requiresIgnition:true});
+  const empty=makeItem(env.actor,'EMPTY',{enabled:false},2,'Кремень');empty.system.bonus={value:0,max:5};empty.flags[NS].ignition={mode:'bonus'};
+  const full=makeItem(env.actor,'FULL',{enabled:false},1,'Кремень');full.system.bonus={value:1,max:5};full.flags[NS].ignition={mode:'bonus'};
   await env.action('on','CANDLE');assert.equal(empty.system.bonus.value,0);assert.equal(full.system.bonus.value,0);
   await env.action('off');assert.equal(await env.action('on','CANDLE'),null);
   assert.equal(empty.system.quantity,2);assert.equal(full.system.quantity,1);
 });
 
 test('a reusable ignition tool never spends quantity or Bonus',async()=>{
-  makeItem(env.actor,'CANDLE',{mode:'disposable',ignitionMode:'require',ignitionItem:'Огниво',ignitionCost:'bonus'});
+  makeItem(env.actor,'CANDLE',{mode:'disposable',requiresIgnition:true});
   const tool=makeItem(env.actor,'TOOL',{enabled:false},1,'Огниво');tool.system.bonus={value:0,max:5};
   await env.action('on','CANDLE');await env.action('off');await env.action('on','CANDLE');
   assert.ok(env.active());assert.equal(tool.system.quantity,1);assert.equal(tool.system.bonus.value,0);
 });
 
 test('failed ignition returns Bonus and the candle without deleting either Item',async()=>{
-  const candle=makeItem(env.actor,'CANDLE',{mode:'disposable',ignitionMode:'consume',ignitionItem:'Спички',ignitionCost:'bonus'});
-  const box=makeItem(env.actor,'BOX',{enabled:false},1,'Спички');box.system.bonus={value:1,max:9};
+  const candle=makeItem(env.actor,'CANDLE',{mode:'disposable',requiresIgnition:true});
+  const box=makeItem(env.actor,'BOX',{enabled:false},1,'Спички');box.system.bonus={value:1,max:9};box.flags[NS].ignition={mode:'bonus'};
   env.token.update=async()=>{throw new Error('Token failed');};
   assert.equal(await env.action('on','CANDLE'),null);assert.equal(box.system.bonus.value,1);
   assert.equal(box.system.quantity,1);assert.equal(candle.system.quantity,1);
@@ -180,25 +181,180 @@ test('failed ignition returns Bonus and the candle without deleting either Item'
 
 test('two linked tokens serialize the final ignition Bonus charge',async()=>{
   const other=makeToken(env.actor,'OTHER');
-  makeItem(env.actor,'A',{mode:'disposable',ignitionMode:'consume',ignitionItem:'Огниво',ignitionCost:'bonus'});
-  makeItem(env.actor,'B',{mode:'disposable',ignitionMode:'consume',ignitionItem:'Огниво',ignitionCost:'bonus'});
-  const tool=makeItem(env.actor,'TOOL',{enabled:false},1,'Огниво');tool.system.bonus={value:1,max:5};
+  makeItem(env.actor,'A',{mode:'disposable',requiresIgnition:true});
+  makeItem(env.actor,'B',{mode:'disposable',requiresIgnition:true});
+  const tool=makeItem(env.actor,'TOOL',{enabled:false},1,'Огниво');tool.system.bonus={value:1,max:5};tool.flags[NS].ignition={mode:'bonus'};
   await Promise.all([env.action('on','A'),env.action('on','B',other)]);
   assert.equal([env.token,other].filter(token=>env.active(token)).length,1);
   assert.equal(tool.system.bonus.value,0);assert.equal(tool.system.quantity,1);
 });
 
 test('a cancelled Bonus update returns the candle without spending a charge',async()=>{
-  const candle=makeItem(env.actor,'CANDLE',{mode:'disposable',ignitionMode:'consume',ignitionItem:'Спички',ignitionCost:'bonus'});
-  const box=makeItem(env.actor,'BOX',{enabled:false},1,'Спички');box.system.bonus={value:1,max:5};box.update=async()=>undefined;
+  const candle=makeItem(env.actor,'CANDLE',{mode:'disposable',requiresIgnition:true});
+  const box=makeItem(env.actor,'BOX',{enabled:false},1,'Спички');box.system.bonus={value:1,max:5};box.flags[NS].ignition={mode:'bonus'};box.update=async()=>undefined;
   assert.equal(await env.action('on','CANDLE'),null);assert.equal(candle.system.quantity,1);assert.equal(box.system.bonus.value,1);assert.equal(env.active(),undefined);
 });
 
 test('cleanup failure cannot roll back a committed ignition',async()=>{
-  makeItem(env.actor,'CANDLE',{mode:'disposable',ignitionMode:'consume',ignitionItem:'Спички'});
+  makeItem(env.actor,'CANDLE',{mode:'disposable',requiresIgnition:true});
   const match=makeItem(env.actor,'MATCH',{enabled:false},1,'Спички');match.delete=async()=>{throw new Error('delete unavailable');};
   assert.ok(await env.action('on','CANDLE'));assert.ok(env.active());assert.equal(match.system.quantity,0);
   await env.action('off');assert.equal(await env.action('on','CANDLE'),null);
+});
+
+/** A separate player's inventory can provide fire without giving away or consuming its Item. */
+async function lightDonor(config={}) {
+  const actor=makeActor('Actor.DONOR'),token=makeToken(actor,'DONOR');token.x=100;token.name='Другой игрок';
+  const item=makeItem(actor,'FIRE',{mode:'disposable',canIgnite:true,...config});
+  await env.action('on','FIRE',token);
+  return {actor,token,item};
+}
+
+test('one Bonus igniter has the same cost for different sources and self-starting lights ignore it',async()=>{
+  const box=makeItem(env.actor,'BOX',{enabled:false},1,'Коробок');box.system.bonus={value:3,max:3};box.flags[NS].ignition={mode:'bonus'};
+  makeItem(env.actor,'A',{requiresIgnition:true});makeItem(env.actor,'B',{requiresIgnition:true});
+  await env.action('on','A');await env.action('off');await env.action('on','B');await env.action('off');
+  assert.equal(box.system.bonus.value,1);
+  await env.action('on','LAMP',env.token,{ignitionId:'item:BOX'});assert.equal(box.system.bonus.value,1);
+});
+
+test('automatic ignition prefers a reusable tool and an explicit choice can spend matches',async()=>{
+  Object.assign(env.lamp.flags[NS].light,{requiresIgnition:true});
+  const matches=makeItem(env.actor,'MATCH',{enabled:false},2,'Спички');makeItem(env.actor,'FLINT',{enabled:false},1,'Огниво');
+  await env.action('on');assert.equal(matches.system.quantity,2);await env.action('off');
+  await env.action('on','LAMP',env.token,{ignitionId:'item:MATCH'});assert.equal(matches.system.quantity,1);
+});
+
+test('a nearby burning source from another player lights a candle without spending matches',async()=>{
+  const donor=await lightDonor();const matches=makeItem(env.actor,'MATCH',{enabled:false},2,'Спички');
+  const candle=makeItem(env.actor,'CANDLE',{mode:'disposable',requiresIgnition:true});
+  assert.ok(env.api.api.getIgnitionOptions(env.token).some(c=>c.id==='flame:DONOR'));
+  await env.action('on','CANDLE');assert.equal(matches.system.quantity,2);assert.equal(candle.system.quantity,0);
+  assert.equal(env.active(donor.token).itemId,'FIRE');assert.equal(env.active(donor.token).remainingSeconds,100);
+  assert.equal(donor.actor.items.get('FIRE'),undefined,'a consumed candle still provides fire from runtime');
+});
+
+for(const [reason,invalidate] of [
+  ['out of range',({token})=>{token.x=301;}],
+  ['above reach',({token})=>{token.elevation=11;}],
+  ['closed shutters',({token})=>{env.active(token).shutterClosed=true;}],
+  ['no capability',({token})=>{env.active(token).config.canIgnite=false;}],
+  ['expired before checkpoint',()=>{env.now+=101000;}],
+  ['actor reassignment',({token})=>{token.actor=makeActor('Actor.CHANGED');}],
+  ['deleted token',({token})=>{env.scene.tokens.splice(env.scene.tokens.indexOf(token),1);}],
+  ['another scene',({token})=>{token.parent={id:'OTHER',grid:env.scene.grid};}]
+])test(`a donor that is ${reason} cannot supply ignition`,async()=>{
+  const donor=await lightDonor();invalidate(donor);
+  const candle=makeItem(env.actor,'CANDLE',{mode:'disposable',requiresIgnition:true});
+  assert.equal(await env.action('on','CANDLE',env.token,{ignitionId:'flame:DONOR'}),null);
+  assert.equal(candle.system.quantity,1);assert.equal(env.active(),undefined);
+});
+
+test('a selected flame going away never silently spends a different ignition resource',async()=>{
+  const {token}=await lightDonor();const matches=makeItem(env.actor,'MATCH',{enabled:false},1,'Спички');
+  makeItem(env.actor,'CANDLE',{requiresIgnition:true});token.x=400;
+  assert.equal(await env.action('on','CANDLE',env.token,{ignitionId:'flame:DONOR'}),null);assert.equal(matches.system.quantity,1);
+  assert.ok(await env.action('on','CANDLE',env.token,{ignitionId:'auto'}));assert.equal(matches.system.quantity,0);
+});
+
+test('a closed door blocks sharing fire on another scene and opening it refreshes reach',async()=>{
+  await lightDonor();makeItem(env.actor,'CANDLE',{requiresIgnition:true});
+  const wall={parent:env.scene,move:20,door:1,ds:0,c:[100,0,100,100]};env.scene.walls.push(wall);
+  assert.equal(await env.action('on','CANDLE'),null);
+  wall.ds=1;await env.fire('updateWall',wall,{ds:1});
+  assert.ok(await env.action('on','CANDLE'));
+});
+
+test('the owner of the receiving token can use another owner’s visible fire but not a hidden token',async()=>{
+  const {token}=await lightDonor();makeItem(env.actor,'CANDLE',{requiresIgnition:true});token.hidden=true;
+  const request={id:'share1',action:'on',sceneId:'S1',tokenId:'T1',itemId:'CANDLE',ignitionId:'flame:DONOR'};
+  apply(env.player,{[`flags.${NS}.request`]:request});
+  await env.fire('updateUser',env.player,{flags:{[NS]:{request}}},{},env.player.id);
+  assert.equal(env.active(),undefined);assert.ok(env.player.getFlag(NS,'result').error);
+  token.hidden=false;request.id='share2';apply(env.player,{[`flags.${NS}.request`]:request});
+  await env.fire('updateUser',env.player,{flags:{[NS]:{request}}},{},env.player.id);
+  assert.equal(env.active().itemId,'CANDLE');assert.equal(env.player.getFlag(NS,'result').error,null);
+});
+
+test('the old candle lights its replacement before being stowed and preserves the original token light',async()=>{
+  const first=makeItem(env.actor,'FIRST',{mode:'disposable',canIgnite:true});
+  makeItem(env.actor,'NEXT',{mode:'disposable',requiresIgnition:true});const base=clone(env.token.currentLight);
+  await env.action('on','FIRST');assert.equal(env.actor.items.get(first.id),undefined);
+  env.now+=3000;await env.action('switch','NEXT',env.token,{ignitionId:'flame:T1'});
+  assert.equal(env.active().itemId,'NEXT');assert.equal(env.token.getFlag(NS,'stowedSources')[0].remainingSeconds,97);
+  await env.action('off');assert.deepEqual(env.token.currentLight,base);
+});
+
+test('a failed replacement preserves the previous light and refunds the new candle and ignition',async()=>{
+  await env.action('on');const old=clone(env.active());
+  const candle=makeItem(env.actor,'CANDLE',{mode:'disposable',requiresIgnition:true});const match=makeItem(env.actor,'MATCH',{enabled:false},1,'Спички');
+  const update=env.token.update;env.token.update=async changes=>changes[`flags.${NS}.active`]?.itemId==='CANDLE'?undefined:update.call(env.token,changes);
+  assert.equal(await env.action('switch','CANDLE'),null);
+  assert.equal(env.active().itemId,old.itemId);assert.equal(env.token.currentLight.bright,4);
+  assert.equal(candle.system.quantity,1);assert.equal(match.system.quantity,1);assert.deepEqual(env.token.getFlag(NS,'stowedSources'),[]);
+});
+
+test('replacement resets shutter and warning state rather than inheriting flags through a deep merge',async()=>{
+  Object.assign(env.lamp.flags[NS].light,{shutter:true});await env.action('on');await env.action('shutter');
+  env.active().lowFuelWarned=true;makeItem(env.actor,'NEXT',{shutter:true});
+  await env.action('switch','NEXT');assert.equal(env.active().shutterClosed,false);assert.equal(env.active().lowFuelWarned,false);
+  assert.equal(env.token.currentLight.bright,4);
+});
+
+test('extinguishing a donor while a target Item saves cancels ignition and refunds the candle',async()=>{
+  const donor=await lightDonor(),candle=makeItem(env.actor,'CANDLE',{mode:'disposable',requiresIgnition:true});
+  const update=candle.update;candle.update=async function(changes){if(changes['system.quantity']===0)await env.action('off','FIRE',donor.token);return update.call(this,changes);};
+  assert.equal(await env.action('on','CANDLE'),null);assert.equal(candle.system.quantity,1);assert.equal(env.active(),undefined);
+});
+
+test('a restarted donor is a different flame even when its token and Item ID stay the same',async()=>{
+  const donor=await lightDonor({mode:'tank'}),candle=makeItem(env.actor,'CANDLE',{mode:'disposable',requiresIgnition:true});
+  const update=candle.update;candle.update=async function(changes){
+    if(changes['system.quantity']===0){await env.action('off','FIRE',donor.token);await env.action('on','FIRE',donor.token);}
+    return update.call(this,changes);
+  };
+  assert.equal(await env.action('on','CANDLE'),null);assert.equal(candle.system.quantity,1);assert.ok(env.active(donor.token));
+});
+
+test('players can list a neighbour’s fire without reading their private inventory',async()=>{
+  const donor=await lightDonor({mode:'tank'}),items=donor.actor.items;
+  donor.actor.items={get(){assert.fail('Neighbour inventory was read on a player client');}};game.user=env.player;
+  try{assert.ok(env.api.api.getIgnitionOptions(env.token).some(c=>c.id==='flame:DONOR'));}
+  finally{donor.actor.items=items;game.user=env.gm;}
+});
+
+test('the elected GM migrates v1 Item and catalog policies once, including a Bonus matchbox',async()=>{
+  const legacy=makeItem(env.actor,'OLD');delete legacy.flags[NS].light.requiresIgnition;delete legacy.flags[NS].light.canIgnite;
+  Object.assign(legacy.flags[NS].light,{ignitionMode:'consume',ignitionCost:'bonus',ignitionItem:'Коробок'});
+  const box=makeItem(env.actor,'BOX',{enabled:false},1,'Коробок');box.system.bonus={value:3,max:5};
+  game.actors=collection([env.actor]);
+  await game.settings.set(NS,'catalog',{version:1,sources:[{id:'s',config:{ignitionMode:'consume',ignitionCost:'bonus',ignitionResource:'box'}}],resources:[{id:'box',names:['Коробок']}]});
+  await game.settings.set(NS,'ignitionSchema',0);
+  env.gm.active=false;await env.fire('userConnected',env.gm,false);env.gm.active=true;await env.fire('userConnected',env.gm,true);
+  assert.equal(box.getFlag(NS,'ignition').mode,'bonus');assert.equal(env.api.api.getCatalog().resources[0].ignition.mode,'bonus');
+  assert.equal(game.settings.get(NS,'ignitionSchema'),2);
+  await env.action('on','OLD');assert.equal(box.system.bonus.value,2);assert.equal(box.system.quantity,1);
+});
+
+test('legacy Item costs migrate even when the world still uses the unsaved default library',async()=>{
+  const legacy=makeItem(env.actor,'OLD');delete legacy.flags[NS].light.requiresIgnition;delete legacy.flags[NS].light.canIgnite;
+  Object.assign(legacy.flags[NS].light,{ignitionMode:'consume',ignitionCost:'bonus',ignitionItem:'Спички'});
+  const box=makeItem(env.actor,'BOX',{enabled:false},1,'Спички');box.system.bonus={value:2,max:5};game.actors=collection([env.actor]);
+  await game.settings.set(NS,'ignitionSchema',0);
+  env.gm.active=false;await env.fire('userConnected',env.gm,false);env.gm.active=true;await env.fire('userConnected',env.gm,true);
+  assert.equal(box.getFlag(NS,'ignition').mode,'bonus');assert.equal(box.system.bonus.value,2);
+  game.actors={get contents(){assert.fail('Completed migration repeated its inventory scan');}};
+  env.gm.active=false;await env.fire('userConnected',env.gm,false);env.gm.active=true;await env.fire('userConnected',env.gm,true);
+});
+
+test('migration recovers Bonus policy from a burning candle whose last Item was already deleted',async()=>{
+  const box=makeItem(env.actor,'BOX',{enabled:false},1,'Спички');box.system.bonus={value:2,max:5};game.actors=collection([env.actor]);
+  const config={enabled:true,mode:'disposable',capacitySeconds:100,remainingSeconds:80,ignitionMode:'consume',ignitionCost:'bonus',ignitionItem:'Спички'};
+  env.token.flags[NS].active={itemId:'DELETED',itemName:'Старая свеча',actorKey:env.actor.uuid,config,remainingSeconds:80,lastAt:env.now,previousLight:{bright:0,dim:0}};
+  await env.fire('updateToken',env.token,{flags:{[NS]:{active:env.active()}}});await game.settings.set(NS,'ignitionSchema',0);
+  env.gm.active=false;await env.fire('userConnected',env.gm,false);env.gm.active=true;await env.fire('userConnected',env.gm,true);
+  assert.equal(box.getFlag(NS,'ignition').mode,'bonus');assert.equal(box.system.bonus.value,2);
+  await env.action('off');await env.action('on','DELETED');assert.equal(box.system.bonus.value,1);assert.equal(box.system.quantity,1);
 });
 
 test('committed on/off transitions broadcast audio and duplicate delivery plays only once',async()=>{
@@ -209,6 +365,21 @@ test('committed on/off transitions broadcast audio and duplicate delivery plays 
   assert.deepEqual(played.map(p=>p.src),['on.ogg','off.ogg']);assert.ok(played.every(p=>p.volume===.3 && p.fade===200));
   await env.fire('updateUser',env.gm,{flags:{[NS]:{sound:{id:env.gm.getFlag(NS,'sound').id}}}},{},env.gm.id);
   assert.equal(played.length,2);
+});
+
+test('replacement sound cues are delivered in order without delaying the inventory action',async()=>{
+  const played=[],sent=[];let release;
+  const gate=new Promise(resolve=>{release=resolve;});
+  game.audio={interface:{},create:options=>({async load(){},async play(){played.push(options.src);},async stop(){}})};
+  env.lamp.flags[NS].light.soundOff='old-off.ogg';await env.action('on');
+  makeItem(env.actor,'NEXT',{soundOn:'new-on.ogg'});
+  const setFlag=env.gm.setFlag;env.gm.setFlag=async function(ns,key,value){
+    if(key==='sound'){sent.push(value.src);if(value.src==='old-off.ogg')await gate;}
+    return setFlag.call(this,ns,key,value);
+  };
+  await env.action('switch','NEXT');assert.equal(env.active().itemId,'NEXT');assert.deepEqual(sent,['old-off.ogg']);
+  release();for(let i=0;i<30;i++)await Promise.resolve();
+  assert.deepEqual(sent,['old-off.ogg','new-on.ogg']);assert.deepEqual(played,['old-off.ogg','new-on.ogg']);
 });
 
 test('failed activation emits no audio, and audio failure cannot undo a successful source',async()=>{
@@ -285,7 +456,7 @@ test('unlinked tokens sharing a base actor ID have independent inventories',asyn
 
 test('shared ignition stock is serialized across linked tokens',async () => {
   const other = makeToken(env.actor,'T2');
-  const ignition = {ignitionMode:'consume',ignitionItem:'Спички'};
+  const ignition = {requiresIgnition:true};
   Object.assign(env.lamp.flags[NS].light,ignition); makeItem(env.actor,'LAMP2',ignition);
   const matches = makeItem(env.actor,'MATCH',{enabled:false},1,'Спички');
   await Promise.all([env.action('on'),env.action('on','LAMP2',other)]);
@@ -390,7 +561,7 @@ test('slow chat delivery does not hold the inventory action queue',async () => {
 });
 
 test('failure to consume ignition refunds the disposable source',async () => {
-  const candle = makeItem(env.actor,'CANDLE',{mode:'disposable',ignitionMode:'consume',ignitionItem:'Спички'});
+  const candle = makeItem(env.actor,'CANDLE',{mode:'disposable',requiresIgnition:true});
   const matches = makeItem(env.actor,'MATCH',{enabled:false},1,'Спички');
   matches.update = async () => { throw new Error('Inventory write failed'); };
   assert.equal(await env.action('on','CANDLE'),null);
@@ -398,7 +569,7 @@ test('failure to consume ignition refunds the disposable source',async () => {
 });
 
 test('failed activation refunds all consumed resources',async () => {
-  const candle = makeItem(env.actor,'CANDLE',{mode:'disposable',ignitionMode:'consume',ignitionItem:'Спички'});
+  const candle = makeItem(env.actor,'CANDLE',{mode:'disposable',requiresIgnition:true});
   const matches = makeItem(env.actor,'MATCH',{enabled:false},1,'Спички');
   env.token.update = async () => { throw new Error('Token write failed'); };
   await env.action('on','CANDLE');
@@ -490,8 +661,9 @@ test('authenticated requests use full User flags when Foundry emits only a diff'
 });
 
 test('infinite source and required ignition never spend fuel or ignition stock',async () => {
-  makeItem(env.actor,'MAGIC',{mode:'infinite',ignitionMode:'require',ignitionItem:'Спички'});
+  makeItem(env.actor,'MAGIC',{mode:'infinite',requiresIgnition:true});
   const matches = makeItem(env.actor,'MATCH',{enabled:false},1,'Спички');
+  matches.flags[NS].ignition={mode:'reusable'};
   await env.action('on','MAGIC'); env.now += 900000; await env.tick();
   assert.equal(env.active().remainingSeconds,null);
   assert.equal(matches.system.quantity,1);
@@ -603,7 +775,7 @@ test('shutters hide light while fuel keeps burning and restore the source on ope
 
 test('switching prevalidates the next source before extinguishing the current one',async()=>{
   await env.action('on');
-  makeItem(env.actor,'NEW',{mode:'disposable',ignitionMode:'consume',ignitionItem:'Missing'});
+  makeItem(env.actor,'NEW',{mode:'disposable',requiresIgnition:true});
   assert.equal(await env.action('switch','NEW'),null);
   assert.equal(env.active().itemId,'LAMP');
   makeItem(env.actor,'CANDLE',{mode:'disposable'});

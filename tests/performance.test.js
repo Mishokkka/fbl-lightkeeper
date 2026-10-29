@@ -74,6 +74,28 @@ test('removing a token or source cancels only its timer, including while paused'
   } finally {await env.close();}
 });
 
+test('shared fire updates on nearby donor movement, without scanning inactive tokens or polling clients',async()=>{
+  const env=await harness({openPanel:true});
+  try {
+    const target=env.tokens[0],donor=env.tokens[1],scene=target.parent;
+    donor.parent.tokens.splice(donor.parent.tokens.indexOf(donor),1);donor.parent=scene;scene.tokens.push(donor);
+    scene.grid={size:100,distance:5};Object.assign(target,{x:0,y:0,width:1,height:1});Object.assign(donor,{x:100,y:0,width:1,height:1});
+    donor.flags['fbl-lightkeeper'].active.config.canIgnite=true;
+    await env.fire('updateToken',donor,{flags:{'fbl-lightkeeper':{active:{config:{canIgnite:true}}}}});
+    await new Promise(resolve=>setTimeout(resolve,70));env.reset();
+    assert.ok(env.api.getIgnitionOptions(target).some(c=>c.id==='flame:'+donor.id));
+    const inactive=scene.tokens.find(t=>t.id.startsWith('OFF'));
+    for(let i=0;i<50;i++)await env.fire('updateToken',inactive,{x:i,y:i});
+    await new Promise(resolve=>setTimeout(resolve,70));assert.equal(env.stats.panelRenders,0);
+    donor.x=500;
+    for(let i=0;i<50;i++)await env.fire('updateToken',donor,{x:donor.x});
+    await new Promise(resolve=>setTimeout(resolve,70));assert.equal(env.stats.panelRenders,1);
+    assert.ok(!env.api.getIgnitionOptions(target).some(c=>c.id==='flame:'+donor.id));
+    for(const key of ['inactiveReads','inactiveActorReads','sceneScans','tokenScans'])assert.equal(env.stats[key],0,key);
+    assert.equal(env.intervals.size,2,'only the existing GM heartbeat and open-panel clock');
+  }finally{await env.close();}
+});
+
 test('item sheet headers have no module configuration button',async()=>{
   const env=await harness({active:0,inactive:0});
   try {assert.equal(env.callbacks.has('getItemSheetHeaderButtons'),false);assert.equal(env.callbacks.has('getHeaderControlsApplicationV2'),false);}

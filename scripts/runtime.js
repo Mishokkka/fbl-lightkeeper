@@ -1,22 +1,23 @@
-import {MODULE_ID} from './logic.js';
+import {MODULE_ID,canPassFire} from './logic.js';
 
 /** Scene-qualified keys also work for test doubles and unlinked tokens. */
 export const tokenKey = token => `${token.parent?.id ?? ''}:${token.id}`;
 
 /** Event-maintained active set: inactive actors are never resolved by the heartbeat. */
 export class ActiveSourceIndex {
-  constructor(actorKey) { this.actorKey=actorKey; this.tokens=new Map(); this.entries=new Map(); this.tanks=new Map(); this.finiteCount=0; }
+  constructor(actorKey) { this.actorKey=actorKey; this.tokens=new Map(); this.entries=new Map(); this.tanks=new Map(); this.igniters=new Set();this.finiteCount=0; }
 
   /** Read only flags first; resolve actor identity only for an active source. */
   sync(token) {
     const state=token.getFlag(MODULE_ID,'active');
     if (!state) { this.remove(token); return; }
-    const key=tokenKey(token), finite=state.config.mode!=='infinite';
+    const key=tokenKey(token), finite=state.config.mode!=='infinite',flame=canPassFire(state.config);
     const tank=state.config.mode==='tank'?JSON.stringify([this.actorKey(token),state.itemId]):null;
     const old=this.entries.get(key);
-    if(old && old.finite===finite && old.tank===tank && this.tokens.get(key)===token) return;
+    if(old && old.finite===finite && old.tank===tank && old.flame===flame && this.tokens.get(key)===token) return;
     this.remove(token);
-    this.tokens.set(key,token); this.entries.set(key,{finite,tank});
+    this.tokens.set(key,token); this.entries.set(key,{finite,tank,flame});
+    if(flame)this.igniters.add(token);
     if(finite) this.finiteCount++;
     if(tank) { if(!this.tanks.has(tank)) this.tanks.set(tank,new Set()); this.tanks.get(tank).add(token); }
   }
@@ -26,6 +27,7 @@ export class ActiveSourceIndex {
     const key=tokenKey(token), old=this.entries.get(key);
     if(!old) return;
     if(old.finite) this.finiteCount--;
+    this.igniters.delete(this.tokens.get(key));
     if(old.tank) {
       const group=this.tanks.get(old.tank); group.delete(this.tokens.get(key));
       if(!group.size) this.tanks.delete(old.tank);
@@ -44,7 +46,8 @@ export class ActiveSourceIndex {
   /** Find an active holder in constant time without visiting unrelated scene tokens. */
   findTank(token,itemId) { return this.tanks.get(JSON.stringify([this.actorKey(token),itemId]))?.values().next().value ?? null; }
   values() { return this.tokens.values(); }
-  clear() { this.tokens.clear(); this.entries.clear(); this.tanks.clear(); this.finiteCount=0; }
+  has(token) { return this.tokens.has(tokenKey(token)); }
+  clear() { this.tokens.clear(); this.entries.clear(); this.tanks.clear();this.igniters.clear(); this.finiteCount=0; }
 }
 
 /** Flatten only changed paths. Handles native Foundry diffs and dotted test updates. */
@@ -82,8 +85,11 @@ export function panelUpdateKind(event,token) {
   const doc=event.document, paths=changedPaths(event.changes);
   const related=prefix=>touchesPath(paths,prefix);
   if(event.type==='scene') return token.parent?.id===doc.id?'render':'none';
+  if(event.type==='wall') return token.parent?.id===doc.parent?.id?'render':'none';
+  if(event.ignitionRelevant && token.parent?.id===doc.parent?.id && !isClockUpdate(event.changes)) return 'render';
   if(event.type==='deletedToken') return tokenKey(token)===tokenKey(doc) || (!!token.actor?.uuid && token.actor.uuid===doc.actor?.uuid)?'render':'none';
   if(event.type==='token') {
+    if(event.hasIgniters && tokenKey(token)===tokenKey(doc) && ['x','y','width','height','elevation'].some(related)) return 'render';
     if(!['name','hidden','actorId','actorLink','delta','light',`flags.${MODULE_ID}`].some(related)) return 'none';
     if(tokenKey(token)===tokenKey(doc)) return isClockUpdate(event.changes)?'clock':'render';
     return related(`flags.${MODULE_ID}.active`) && token.actor?.uuid===doc.actor?.uuid?'render':'none';
