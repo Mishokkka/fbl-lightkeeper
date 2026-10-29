@@ -36,16 +36,18 @@ class PreviewApp {
   async render() {
     if(!this.element) {
       this.element=document.createElement('section'); this.element.id=this.options.id ?? crypto.randomUUID();
-      this.element.className='application '+(this.options.classes??[]).join(' ');
+      this.element.className='application themed '+(document.body.classList.contains('theme-light')?'theme-light':'theme-dark')+' '+(this.options.classes??[]).join(' ');
       const pos=this.options.position;
       this.element.style.width=pos.width+'px'; this.element.style.height=(typeof pos.height==='number'?pos.height:760)+'px';
       this.element.style.top='75px'; this.element.style.left=this.element.id==='fbl-lightkeeper-panel'?'28px':'550px';
       if(innerWidth<1150 && this.element.id!=='fbl-lightkeeper-panel') this.element.style.left='40px';
-      this.element.innerHTML='<header class="window-header"><i class="fa-solid fa-lightbulb"></i><h1 class="window-title"></h1><button type="button" data-action="close" aria-label="Закрыть">×</button></header><div class="window-content"></div>';
+      this.element.innerHTML='<header class="window-header"><i class="window-icon fa-solid fa-lightbulb"></i><h1 class="window-title"></h1><button type="button" class="header-control icon fa-solid fa-ellipsis-vertical" data-action="toggleControls" aria-label="Меню окна"></button><button type="button" class="header-control icon fa-solid fa-xmark" data-action="close" aria-label="Закрыть"></button></header><menu class="controls-dropdown"><li class="header-control"><button type="button" class="control" data-action="preview-minimize"><i class="control-icon fa-solid fa-window-minimize"></i><span class="control-label">Свернуть</span></button></li></menu><section class="window-content"></section><div class="window-resize-handle"></div>';
       this.element.querySelector('.window-title').textContent=this.options.window.title;
       this.element.addEventListener('click',event=>{
         const target=event.target.closest('[data-action]'); if(!target || target.disabled) return;
-        if(target.dataset.action==='close') void this.close(); else this._onClickAction(event,target);
+        if(target.dataset.action==='close') void this.close();
+        else if(target.dataset.action==='toggleControls') this.element.querySelector('.controls-dropdown').classList.toggle('expanded');
+        else if(target.dataset.action!=='preview-minimize') this._onClickAction(event,target);
       });
       document.body.append(this.element);
     }
@@ -65,7 +67,8 @@ const actor={id:'A1',uuid:'Actor.A1',name:'Элиас Блэквуд',items:coll
 function item(id,name,quantity=1) {
   const doc={id,uuid:'Actor.A1.Item.'+id,parent:actor,type:'gear',documentName:'Item',name,system:{quantity},flags:{},getFlag,
     async update(changes) { apply(this,changes); await fire('updateItem',this,changes); return this; },
-    async setFlag(ns,key,value) { return this.update({['flags.'+ns+'.'+key]:value}); }};
+    async setFlag(ns,key,value) { return this.update({['flags.'+ns+'.'+key]:value}); },
+    async delete() {actor.items.splice(actor.items.indexOf(this),1);await fire('deleteItem',this);return this;}};
   actor.items.push(doc); return doc;
 }
 const lamp=item('LAMP','Фонарь со шторками'); item('CANDLE','Свеча',3); item('FLASH','Карманный фонарик'); item('MATCH','Спички',8); item('OIL','Ламповое масло',2); item('BAT','Батарейка',2);
@@ -88,6 +91,9 @@ lamp.flags['fbl-lightkeeper']={light:{...module.api.getCatalog().sources.find(s=
 await module.api.requestAction(token,'on','LAMP'); await module.api.open();
 document.querySelector('#demo-panel').onclick=()=>module.api.open();
 document.querySelector('#demo-library').onclick=()=>module.api.library();
-document.querySelector('#demo-light').onclick=()=>document.body.classList.toggle('theme-light');
+document.querySelector('#demo-light').onclick=()=>{
+  const light=document.body.classList.toggle('theme-light');document.body.classList.toggle('theme-dark',!light);
+  for(const app of document.querySelectorAll('.fbl-lk-window')) {app.classList.toggle('theme-light',light);app.classList.toggle('theme-dark',!light);}
+};
 document.querySelector('#demo-pause').onclick=async()=>{game.paused=!game.paused;await fire('pauseGame',game.paused);};
 globalThis.demo={api:module.api,token,actor,fire};

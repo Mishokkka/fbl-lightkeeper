@@ -2,6 +2,13 @@
 <html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Lightkeeper · UI preview</title>
 <link rel="stylesheet" href="/core/fonts/fontawesome/css/all.min.css">
+<!-- Optional local Foundry assets: loaded only when the preview opts into them. -->
+<script>
+  const previewOptions=new URLSearchParams(location.search);
+  for(const [flag,url] of [['foundry','/core/css/foundry2.css'],['system','/system/forbidden-lands.css']]) {
+    if(previewOptions.has(flag)) {const link=document.createElement('link');link.rel='stylesheet';link.href=url;document.head.append(link);}
+  }
+</script>
 <style>
   *{box-sizing:border-box}body{margin:0;background:#252d34;color:#e3e7e9;font:13px 'Segoe UI',sans-serif;min-height:100vh}
   body.theme-light{background:#ede8df;color:#263138}body.theme-light .application :is(input,select,textarea){background:#fff;color:#111;border-color:#bbb}
@@ -11,6 +18,6 @@
   .application{position:absolute;display:flex;flex-direction:column}.window-header{display:flex;align-items:center;gap:8px;min-height:36px}.window-title{flex:1}.window-content{flex:1;min-height:0}
   .demo-toasts{position:fixed;z-index:2000;bottom:12px;left:12px;display:flex;flex-direction:column;gap:4px}.demo-toast{background:#172b32;color:#ffe0aa;border:1px solid #9a8054;border-radius:6px;padding:10px 14px;max-width:450px}
 </style>
-<link rel="stylesheet" href="../styles/lightkeeper.css"></head><body>
+<link rel="stylesheet" href="../styles/lightkeeper.css"></head><body class="theme-dark">
 <nav class="demo-bar"><strong>LIGHTKEEPER / ПРЕВЬЮ</strong><button id="demo-light">Светлая тема Foundry</button><button id="demo-panel">Панель</button><button id="demo-library">Библиотека</button><button id="demo-pause">Пауза мира</button></nav>
 <div class="demo-toasts"></div><script type="module" src="/tests/preview.js"></script></body></html>

@@ -1,8 +1,8 @@
-import {normalizeConfig} from './logic.js';
+import {normalizeConfig,getQuantity,getResourceStock} from './logic.js';
 
 export const ICONS = Object.freeze({candle:'fa-fire-flame-simple',lamp:'fa-fire-burner',
   lantern:'fa-lightbulb',flashlight:'fa-bolt',magic:'fa-wand-sparkles',fuel:'fa-droplet',
-  matches:'fa-fire',battery:'fa-battery-half'});
+  matches:'fa-fire',battery:'fa-battery-half',settings:'fa-gear',folder:'fa-folder-open'});
 /** Bound display text stored in a catalog record. */
 const text = (value, max = 120) => String(value ?? '').trim().slice(0,max);
 /** Fold Unicode, case, whitespace and Russian yo for predictable item matching. */
@@ -53,10 +53,10 @@ export function identifySource(item, catalog, autoRecognize = true) {
     : {config:normalizeConfig(),origin:'none',preset:null};
 }
 /** Reference stock lookup; a deleted named rule must not silently fall back to another resource. */
-export function findResource(actor, key, fallbackName, catalog, exceptId = '') {
+export function findResource(actor, key, fallbackName, catalog, exceptId = '',unit='quantity') {
   const resource = catalog.resources.find(r => r.id === key);
   if (key && !resource) return null;
-  return actor.items.find(item => item.id !== exceptId && Number(item.system?.quantity) >= 1 &&
+  return actor.items.find(item => item.id !== exceptId && getQuantity(item)>=1 && getResourceStock(item,unit)>=1 &&
     (resource ? matchesItem(item,resource) : nameKey(item.name) === nameKey(fallbackName) && !!nameKey(fallbackName))) ?? null;
 }
 
@@ -102,10 +102,10 @@ export class PresetIndex {
       :{config:normalizeConfig(),origin:'none',preset:null};
   }
   /** Quantities are read fresh, so consumption never relies on a cached stock count. */
-  findResource(actor,key,fallbackName,exceptId='') {
+  findResource(actor,key,fallbackName,exceptId='',unit='quantity') {
     const resource=this.resourcesById.get(key), name=key?'':nameKey(fallbackName);
     if(key && !resource) return null;
-    return actor.items.find(item=>item.id!==exceptId && Number(item.system?.quantity)>=1 &&
+    return actor.items.find(item=>item.id!==exceptId && getQuantity(item)>=1 && getResourceStock(item,unit)>=1 &&
       (resource?this.matches(item,resource):!!name && this.itemKey(item).name===name)) ?? null;
   }
 }
@@ -116,14 +116,14 @@ export function defaultCatalog() {
   return normalizeCatalog({sources:[
     source('candle','Свеча','candle',['Свеча','Candle'],{mode:'disposable',capacitySeconds:1800,bright:1,dim:3,ignitionMode:'consume',ignitionResource:'matches',lowFuelSeconds:120}),
     source('candle-stub','Огарок свечи','candle',['Огарок свечи'],{mode:'disposable',capacitySeconds:600,bright:1,dim:2,ignitionMode:'consume',ignitionResource:'matches'}),
-    source('torch','Факел','candle',['Факел','Torch'],{mode:'disposable',capacitySeconds:3600,bright:4,dim:8,ignitionMode:'require',ignitionResource:'matches'}),
+    source('torch','Факел','candle',['Факел','Torch'],{mode:'disposable',capacitySeconds:3600,bright:4,dim:8,ignitionMode:'consume',ignitionResource:'matches'}),
     source('oil-lamp','Масляная лампа','lamp',['Масляная лампа','Oil Lamp'],{mode:'tank',capacitySeconds:2400,bright:3,dim:5,refillResource:'oil',refillSeconds:1200,ignitionMode:'consume',ignitionResource:'matches'}),
     source('hooded-lantern','Фонарь со шторками','lantern',['Фонарь со шторками','Hooded Lantern'],{mode:'tank',capacitySeconds:2400,bright:4,dim:6,shutter:true,refillResource:'oil',refillSeconds:1200,ignitionMode:'consume',ignitionResource:'matches'}),
     source('flashlight','Карманный фонарик','flashlight',['Карманный фонарик','Фонарик','Flashlight'],{mode:'tank',capacitySeconds:900,bright:3,dim:6,angle:75,color:'#dbe9ff',animation:'none',refillResource:'battery',refillSeconds:900}),
     source('powerful-flashlight','Мощный фонарик','flashlight',['Мощный фонарик'],{mode:'tank',capacitySeconds:600,bright:6,dim:10,angle:50,color:'#edf3ff',animation:'none',refillResource:'battery',refillSeconds:600}),
     source('magic','Магический свет','magic',['Магический свет'],{mode:'infinite',bright:3,dim:6,color:'#9ad7d1',animation:'pulse'})
   ],resources:[
-    {id:'matches',label:'Спички / розжиг',icon:'matches',names:['Спички','Спичка','Matches','Match']},
+    {id:'matches',label:'Спички',icon:'matches',names:['Спички','Спичка','Коробок спичек','Matches','Match','Matchbox']},
     {id:'oil',label:'Ламповое масло',icon:'fuel',names:['Ламповое масло','Масло','Lamp Oil']},
     {id:'battery',label:'Батарейки',icon:'battery',names:['Батарейка','Батарейки','Battery','Batteries']}
   ]});
