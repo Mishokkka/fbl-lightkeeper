@@ -49,3 +49,19 @@ test('changing player control refreshes an already open panel without resetting 
     assert.deepEqual(env.tokens[0].flags[NS].active,before);assert.equal(env.stats.tokenWrites,0);
   }finally{await env.close();}
 });
+
+test('deleting a selected token with an explicit flame choice clears the panel without rendering errors',async()=>{
+  const env=await harness({active:1,inactive:0,inventory:2});
+  const warnings=[];
+  try {
+    ui.notifications.warn=message=>warnings.push(message);
+    const token=env.tokens[0];await token.update({[`flags.${NS}.active.config.canIgnite`]:true});
+    env.actors[0].items[1].flags[NS].light={enabled:true,mode:'disposable',requiresIgnition:true};
+    const panel=await env.api.open(token);panel.ignitionId='flame:'+token.id;await panel.render({force:true});
+    assert.ok(panel.html.includes('value="flame:'+token.id+'"'));
+    token.parent.tokens.splice(token.parent.tokens.indexOf(token),1);
+    await env.fire('deleteToken',token);await new Promise(resolve=>setTimeout(resolve,70));
+    assert.deepEqual(warnings,[]);assert.match(panel.html,/Выберите на сцене токен персонажа/);
+    assert.equal(env.intervals.size,0);
+  }finally{await env.close();}
+});

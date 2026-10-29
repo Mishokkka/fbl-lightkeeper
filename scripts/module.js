@@ -319,7 +319,7 @@ function ignitionProblem(token,itemId,choice,user,candidates) {
   if(selected?.item?.id===itemId)return 'Источник не может разжечь сам себя';
   if(selected?.reason)return selected.reason;
   if(selected?.available)return '';
-  if(choice.startsWith('flame:'))return flameProblem(token,resolveToken(token.parent?.id,choice.slice(6)),user) || 'Выбранный огонь изменился';
+  if(choice.startsWith('flame:'))return flameProblem(token,resolveToken(token?.parent?.id,choice.slice(6)),user) || 'Выбранный огонь изменился';
   return 'Выбранный розжиг недоступен. Выберите другой';
 }
 /** Recheck after asynchronous Item writes, including movement and extinguishing on another actor. */
